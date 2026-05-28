@@ -1,0 +1,204 @@
+import pytest
+
+from agent_search import service
+
+
+def test_minimum_profile_reports_missing_categories(monkeypatch):
+    monkeypatch.setenv("AGENT_SEARCH_MINIMUM_PROFILE", "standard")
+
+    result = service.validate_minimum_profile()
+
+    assert result["ok"] is False
+    assert set(result["missing"]) == {"main_search", "docs_search", "web_fetch"}
+    assert "capability_status" in result
+
+
+@pytest.mark.asyncio
+async def test_mock_smoke_passes():
+    result = await service.smoke("mock")
+
+    assert result["ok"] is True
+    assert result["failed_cases"] == []
+    assert any(case["name"] == "docs_search fallback context7_to_exa" for case in result["cases"])
+    assert any(case["name"] == "deep_research explicit planner simple current prompt uses capability plan" for case in result["cases"])
+
+
+@pytest.mark.asyncio
+async def test_mock_smoke_covers_deep_research_capability_matrix():
+    result = await service.smoke("mock")
+    case_names = {case["name"] for case in result["cases"]}
+
+    expected = {
+        "deep_research explicit planner simple current prompt uses capability plan",
+        "deep_research docs api prompt uses docs capabilities",
+        "deep_research claim verification requires fetch_before_claim",
+        "deep_research url prompt is fetch first",
+        "deep_research normal search prompt does not trigger",
+        "deep_research missing provider gives capability guidance",
+        "deep_research fixed topic recipes are examples not schema",
+    }
+    assert expected <= case_names
+
+    current_case = next(case for case in result["cases"] if case["name"] == "deep_research explicit planner simple current prompt uses capability plan")
+    plan = current_case["research_plan"]
+    assert plan["question"] == "深度搜索一下最近的比特币行情"
+    assert plan["intent_signals"]["recency_requirement"] == "current"
+    assert plan["intent_signals"]["claim_risk"] == "high"
+    assert plan["trigger_source"] == "explicit_cli"
+    assert plan["preflight"]["executed_by_deep_command"] is False
+    assert plan["evidence_policy"] == "fetch_before_claim"
+    assert {"intent_signals", "decomposition", "capability_plan", "gap_check", "usage_boundary"} <= set(plan)
+
+
+@pytest.mark.asyncio
+async def test_mock_smoke_does_not_depend_on_local_keys(monkeypatch):
+    for key in service.config._CONFIG_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("AGENT_SEARCH_MINIMUM_PROFILE", "standard")
+
+    result = await service.smoke("mock")
+
+    assert result["ok"] is True
+    assert result["failed_cases"] == []
+    assert any(case["name"] == "doctor minimum profile fails closed" for case in result["cases"])
+
+
+@pytest.mark.asyncio
+async def test_live_smoke_treats_web_search_failure_as_degraded_when_fallback_exists(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-secret")
+
+    async def fake_doctor():
+        return {
+            "ok": True,
+            "minimum_profile_ok": True,
+            "error_type": "",
+            "error": "",
+            "capability_status": {
+                "main_search": {"configured": ["xai-responses"], "fallback_chain": ["xai-responses", "openai-compatible"], "ok": True},
+                "web_search": {"configured": ["tavily", "firecrawl"], "fallback_chain": ["tavily", "firecrawl"], "ok": True},
+                "docs_search": {"configured": ["context7"], "fallback_chain": ["context7", "exa"], "ok": True},
+                "web_fetch": {"configured": ["tavily"], "fallback_chain": ["tavily", "firecrawl"], "ok": True},
+            },
+            "context7_connection_test": {"status": "not_configured", "message": "CONTEXT7_API_KEY 未设置"},
+        }
+
+    async def fake_fetch(url):
+        return {"ok": True, "url": url, "provider": "tavily", "content": "# Page", "provider_attempts": []}
+
+    monkeypatch.setattr(service, "doctor", fake_doctor)
+    monkeypatch.setattr(service, "fetch", fake_fetch)
+
+    async def fake_web_search(query, count=5, providers="auto", fallback="auto"):
+        return [{"url": "https://example.com", "provider": "firecrawl"}], [
+            {"capability": "web_search", "provider": "tavily", "status": "error", "error": "HTTP 429"},
+            {"capability": "web_search", "provider": "firecrawl", "status": "ok", "result_count": 1},
+        ]
+
+    monkeypatch.setattr(service, "_run_web_search_fallback", fake_web_search)
+
+    result = await service.smoke("live")
+
+    assert result["ok"] is True
+    assert result["failed_cases"] == []
+
+
+@pytest.mark.asyncio
+async def test_fetch_attempts_show_fallback(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-secret")
+
+    async def no_tavily(url):
+        return None
+
+    async def yes_firecrawl(url, ctx=None):
+        return "# Page"
+
+    monkeypatch.setattr(service, "call_tavily_extract", no_tavily)
+    monkeypatch.setattr(service, "call_firecrawl_scrape", yes_firecrawl)
+
+    result = await service.fetch("https://example.com")
+
+    assert result["ok"] is True
+    assert result["provider"] == "firecrawl"
+    assert result["fallback_used"] is True
+    assert [a["provider"] for a in result["provider_attempts"]] == ["tavily", "firecrawl"]
+
+
+@pytest.mark.asyncio
+async def test_search_docs_intent_uses_docs_fallback(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://api.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "sk-test-secret")
+    monkeypatch.setenv("EXA_API_KEY", "exa-secret")
+    monkeypatch.setenv("CONTEXT7_API_KEY", "ctx-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-secret")
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Answer."
+
+    async def fake_context7(name, query=""):
+        return {"ok": True, "results": [{"id": "/facebook/react", "title": "React", "description": "UI"}], "total": 1}
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "context7_library", fake_context7)
+
+    result = await service.search("React useEffect API docs", validation="balanced")
+
+    assert result["ok"] is True
+    assert result["routing_decision"]["docs_intent"] is True
+    assert result["fallback_used"] is False
+    assert "context7" in result["providers_used"]
+    assert "exa" not in result["providers_used"]
+
+
+@pytest.mark.asyncio
+async def test_search_docs_intent_falls_back_to_exa_after_context7_empty(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://api.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "sk-test-secret")
+    monkeypatch.setenv("EXA_API_KEY", "exa-secret")
+    monkeypatch.setenv("CONTEXT7_API_KEY", "ctx-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-secret")
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Answer."
+
+    async def fake_context7(name, query=""):
+        return {"ok": True, "results": [], "total": 0}
+
+    async def fake_exa(*args, **kwargs):
+        return {"ok": True, "results": [{"url": "https://docs.example.com", "title": "Docs"}]}
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "context7_library", fake_context7)
+    monkeypatch.setattr(service, "exa_search", fake_exa)
+
+    result = await service.search("React useEffect API docs", validation="balanced")
+
+    assert result["ok"] is True
+    assert result["fallback_used"] is True
+    providers = [attempt["provider"] for attempt in result["provider_attempts"] if attempt["capability"] == "docs_search"]
+    assert providers == ["context7", "exa"]
+    assert "exa" in result["providers_used"]
+
+
+@pytest.mark.asyncio
+async def test_search_current_uses_tavily_web_reinforcement(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://api.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "sk-test-secret")
+    monkeypatch.setenv("EXA_API_KEY", "exa-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-secret")
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Answer."
+
+    async def fake_tavily(query, max_results=6):
+        return [{"url": "https://example.com/news", "title": "News", "content": "desc"}]
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "call_tavily_search", fake_tavily)
+
+    result = await service.search("今天国内 AI 新闻", validation="balanced")
+
+    assert result["ok"] is True
+    assert result["routing_decision"]["web_current_intent"] is True
+    assert "tavily" in result["providers_used"]
