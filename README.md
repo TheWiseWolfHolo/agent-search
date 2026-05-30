@@ -183,7 +183,9 @@ git push origin main
 git push origin vX.Y.Z
 ```
 
-Prereleases use `<package.json version>-beta.N` and npm dist-tag `next`. The publish workflow refuses to publish a prerelease as `latest`.
+Prereleases use an explicit manual GitHub Actions dispatch with `<package.json version>-beta.N` and npm dist-tag `next`. The publish workflow refuses to publish a prerelease as `latest`.
+
+Publishing requires a repository secret named `NPM_TOKEN` with permission to publish under the npm scope `@thewisewolfholo`. A normal `main` push does not publish npm.
 
 Before publishing, run:
 

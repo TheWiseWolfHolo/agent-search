@@ -183,7 +183,9 @@ git push origin main
 git push origin vX.Y.Z
 ```
 
-测试版使用 `<package.json version>-beta.N` 和 npm `next`。发布 workflow 会拒绝把 prerelease 发到 `latest`。
+测试版通过 GitHub Actions 手动 dispatch，使用 `<package.json version>-beta.N` 和 npm `next`。发布 workflow 会拒绝把 prerelease 发到 `latest`。
+
+发布需要仓库 secret `NPM_TOKEN`，并且这个 token 必须有 npm scope `@thewisewolfholo` 的发布权限。普通 `main` push 不会发布 npm。
 
 发布前运行：
 

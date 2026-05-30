@@ -62,13 +62,13 @@ def test_publish_workflow_uses_beta_lane_and_prerelease_guardrails():
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
     assert "workflow_dispatch:" in workflow
+    assert "branches:" not in workflow
     assert "github.event.inputs.target_ref" in workflow
     assert "github.event.inputs.version" in workflow
     assert "github.event.inputs.npm_tag" in workflow
-    assert "resolve-prerelease-version.js" in workflow
-    assert "Detect stable release bump commit" in workflow
-    assert "chore\\(release\\)" in workflow
-    assert "stable-bump.outputs.skip != 'true'" in workflow
+    assert "Publishing is only supported from v* tags or workflow_dispatch." in workflow
+    assert "NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}" in workflow
+    assert "stable-bump" not in workflow
     assert "-dev.${GITHUB_RUN_NUMBER}" not in workflow
     assert "&& inputs." not in workflow
     assert "|| inputs." not in workflow
@@ -95,6 +95,8 @@ def test_release_docs_explain_release_lanes_and_verification():
         "Release Lanes",
         "<package.json version>-beta.N",
         "npm dist-tag `next`",
+        "A normal `main` push does not publish npm",
+        "NPM_TOKEN",
         "npm test",
         "npm pack --dry-run",
         "@thewisewolfholo/agent-search@latest",
@@ -109,6 +111,8 @@ def test_release_docs_explain_release_lanes_and_verification():
         "发布通道",
         "<package.json version>-beta.N",
         "npm `next`",
+        "普通 `main` push 不会发布 npm",
+        "NPM_TOKEN",
         "npm test",
         "npm pack --dry-run",
         "@thewisewolfholo/agent-search@latest",
@@ -122,6 +126,8 @@ def test_release_docs_explain_release_lanes_and_verification():
         "Release Lanes",
         "<package.json version>-beta.N",
         "chore(release): bump version to X.Y.Z",
+        "workflow_dispatch",
+        "NPM_TOKEN",
         ".github/releases/vX.Y.Z.md",
         "npm versions are immutable",
         "agent-search smoke --mock --format json",
