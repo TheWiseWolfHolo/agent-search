@@ -16,7 +16,7 @@
 
 ## Commands
 
-- `agent-search search QUERY [--platform NAME] [--model ID] [--extra-sources N] [--validation fast|balanced|strict] [--fallback auto|off] [--providers auto|CSV] [--stream|--no-stream] [--timeout SECONDS] [--format json|markdown|content] [--output PATH]`
+- `agent-search search QUERY [--platform NAME] [--model ID] [--extra-sources N] [--validation fast|balanced|strict] [--fallback auto|off] [--providers auto|CSV] [--api-format FORMAT] [--reasoning-effort EFFORT] [--stream|--no-stream] [--timeout SECONDS] [--format json|markdown|content] [--output PATH]`
 - `agent-search fetch URL [--format json|markdown|content] [--output PATH]`
 - `agent-search exa-search QUERY [--num-results N] [--search-type neural|keyword|auto] [--include-text] [--include-highlights] [--start-published-date YYYY-MM-DD] [--include-domains DOMAIN...] [--exclude-domains DOMAIN...] [--category NAME] [--format json|markdown|content] [--output PATH]`
 - `agent-search exa-similar URL [--num-results N] [--format json|markdown|content] [--output PATH]`
@@ -30,7 +30,7 @@
 - `agent-search map URL [--instructions TEXT] [--max-depth N] [--max-breadth N] [--limit N] [--timeout SECONDS] [--format json|markdown|content] [--output PATH]`
 - `agent-search doctor [--format json|markdown|content] [--output PATH]`
 - `agent-search diagnose openai-compatible [--timeout SECONDS] [--format json|markdown] [--output PATH]`
-- `agent-search setup [--lang zh|en] [--advanced] [--non-interactive] [--skip-skills] [--install-skills CSV] [--skills-root PATH] [--xai-api-url URL] [--xai-api-key KEY] [--xai-model ID] [--xai-tools-explicit CSV] [--openai-compatible-api-url URL] [--openai-compatible-api-key KEY] [--openai-compatible-model ID] [--openai-compatible-stream true|false] [--validation-level fast|balanced|strict] [--fallback-mode auto|off] [--minimum-profile standard|off] [--exa-key KEY] [--context7-key KEY] [--tavily-api-url URL] [--tavily-key KEY] [--firecrawl-api-url URL] [--firecrawl-key KEY] [--anysearch-api-url URL] [--anysearch-key KEY] [--anysearch-timeout SECONDS] [--format json|markdown|content] [--output PATH]`
+- `agent-search setup [--lang zh|en] [--advanced] [--non-interactive] [--skip-skills] [--install-skills CSV] [--skills-root PATH] [--xai-api-url URL] [--xai-api-key KEY] [--xai-model ID] [--xai-tools-explicit CSV] [--xai-api-format FORMAT] [--xai-reasoning-effort EFFORT] [--openai-compatible-api-url URL] [--openai-compatible-api-key KEY] [--openai-compatible-model ID] [--openai-compatible-stream true|false] [--validation-level fast|balanced|strict] [--fallback-mode auto|off] [--minimum-profile standard|off] [--exa-key KEY] [--context7-key KEY] [--tavily-api-url URL] [--tavily-key KEY] [--firecrawl-api-url URL] [--firecrawl-key KEY] [--anysearch-api-url URL] [--anysearch-key KEY] [--anysearch-timeout SECONDS] [--format json|markdown|content] [--output PATH]`
 - `agent-search config path [--format json|markdown|content] [--output PATH]`
 - `agent-search config list [--format json|markdown|content] [--output PATH]`
 - `agent-search config set KEY VALUE [--format json|markdown|content] [--output PATH]`
@@ -111,11 +111,27 @@ Web-source reinforcement setup:
 - `FIRECRAWL_API_URL` defaults to the official Firecrawl REST base.
 - `web_search` fallback stays within the same capability: Tavily is attempted first, then Firecrawl when configured.
 
+xAI channel wire formats:
+
+- `XAI_API_FORMAT` defaults to canonical `responses` when missing or blank. Canonical values are `responses`, `chat-completions`, `messages`, and `google`.
+- Config normalization accepts `response` / `responses`; `chatcompletion` / `chatcompletions` / `chat-completion` / `chat-completions` / `chat_completion` / `chat_completions`; `message` / `messages` / `anthropic`; and `google` / `gemini` / `generate-content` / `generate_content` / `generatecontent`.
+- `search --api-format FORMAT` overrides the configured format for the current invocation and uses the same normalization. `search --reasoning-effort EFFORT` overrides `XAI_REASONING_EFFORT`.
+- `XAI_REASONING_EFFORT` is optional. If the selected value is missing or blank, the serialized request body must omit all reasoning/thinking fields rather than sending a default or null value.
+- Use `agent-search config unset XAI_REASONING_EFFORT` to clear a previously persisted effort.
+- Native endpoint, auth, reasoning, and search-tool mappings are:
+  - `responses`: `/responses`, `Authorization: Bearer`, optional `reasoning.effort`; configured `web_search` and `x_search` are sent as native tool types.
+  - `chat-completions`: `/chat/completions`, `Authorization: Bearer`, optional top-level `reasoning_effort`; `XAI_TOOLS` are not sent in this request shape.
+  - `messages`: `/messages`, `x-api-key` plus `anthropic-version`, optional `output_config.effort` without forcing a thinking mode; only `web_search` maps to `web_search_20250305`, and `x_search` is omitted.
+  - `google`: `/models/{model}:generateContent`, `x-goog-api-key`, optional `generationConfig.thinkingConfig.thinkingLevel`; only `web_search` maps to `googleSearch`, and `x_search` is omitted.
+- For Google format, a configured effort is upper-cased when written to `thinkingLevel`.
+- Interactive setup prompts for both xAI format and optional effort. Non-interactive setup persists them with `--xai-api-format FORMAT` and `--xai-reasoning-effort EFFORT`.
+- `search` has a 180-second default hard timeout. An explicit `--timeout SECONDS` overrides it for the current invocation.
+
 OpenAI-compatible streaming:
 
 - `OPENAI_COMPATIBLE_STREAM` defaults to `false` and accepts `true`, `1`, or `yes` as true.
 - `search --stream` and `search --no-stream` override `OPENAI_COMPATIBLE_STREAM` for the current invocation.
-- Streaming applies only to OpenAI-compatible `search()` and provider-side `fetch()` calls. `describe_url()` and `rank_sources()` stay non-streaming. xAI Responses behavior is unchanged.
+- Streaming applies only to OpenAI-compatible `search()` and provider-side `fetch()` calls. `describe_url()` and `rank_sources()` stay non-streaming. xAI-channel behavior is unchanged.
 
 AnySearch experimental output:
 
@@ -282,16 +298,15 @@ Agent timeout handling contract:
 
 ## Provider Routing
 
-- `search` builds `main_search` from peer providers only: `XAI_API_KEY` registers official xAI Responses, while `OPENAI_COMPATIBLE_API_URL` + `OPENAI_COMPATIBLE_API_KEY` registers OpenAI-compatible Chat Completions.
-- Official xAI calls use the Responses API `/responses` route through `XAI_*`. Compatible relays/gateways use Chat Completions `/chat/completions` through `OPENAI_COMPATIBLE_*`.
-- `OPENAI_COMPATIBLE_STREAM` and `search --stream/--no-stream` affect only the OpenAI-compatible Chat Completions transport for search/fetch. They do not change xAI Responses or provider-internal ranking/URL description tasks.
+- `search` builds `main_search` from peer providers only: `XAI_API_KEY` registers the xAI multi-protocol channel, while `OPENAI_COMPATIBLE_API_URL` + `OPENAI_COMPATIBLE_API_KEY` registers the separate OpenAI-compatible Chat Completions provider.
+- The xAI channel defaults to Responses `/responses`; `XAI_API_FORMAT` or `search --api-format` can select `responses`, `chat-completions`, `messages`, or `google` without changing the separate OpenAI-compatible peer configuration.
+- `OPENAI_COMPATIBLE_STREAM` and `search --stream/--no-stream` affect only the OpenAI-compatible Chat Completions transport for search/fetch. They do not change the xAI channel or provider-internal ranking/URL description tasks.
 - Legacy `AGENT_SEARCH_API_URL`, `AGENT_SEARCH_API_KEY`, `AGENT_SEARCH_API_MODE`, `AGENT_SEARCH_MODEL`, and `AGENT_SEARCH_XAI_TOOLS` are unsupported config keys. `config set` / `config unset` must return a parameter error for them.
-- `XAI_TOOLS` applies only to xAI Responses mode and supports only `web_search` and `x_search`.
-- Chat Completions mode must not send xAI `web_search` / `x_search` tools or legacy `search_parameters`; xAI Chat Completions Live Search is deprecated.
+- `XAI_TOOLS` accepts only `web_search` and `x_search`. Responses can send both; Messages and Google map only `web_search`; Chat Completions sends neither; unsupported `x_search` mappings must be omitted.
 - Standard minimum profile requires `main_search`, `docs_search`, and fetch capability. Missing required capabilities produce a configuration error.
 - Optional experimental `vertical_search` may report AnySearch when `ANYSEARCH_API_KEY` is configured, but it is not part of the `web_search` fallback and is not required by the `standard` minimum profile.
 - Same-capability fallback is allowed; cross-capability fallback is not. Context7 is not used for unrelated broad web queries, and page extraction providers are not used as docs search providers.
-- `main_search`: xAI Responses first for Grok/xAI, then OpenAI-compatible answer fallback when that peer provider is separately configured and `--fallback auto` is active.
+- `main_search`: the xAI channel first (Responses by default), then OpenAI-compatible answer fallback when that peer provider is separately configured and `--fallback auto` is active.
 - `web_search`: Tavily first, then Firecrawl source search when configured.
 - `docs_search`: Context7 first for library/API/docs intent, then Exa for official-domain, paper, product-page, trusted-site, or low-noise supplemental discovery.
 - Fetch capability: Tavily first, then Firecrawl.
@@ -324,7 +339,7 @@ Agent timeout handling contract:
 
 - Provider architecture changes must be verified as distributable CLI behavior, not as behavior that only works because one developer machine has a specific wrapper, shell profile, or local config file.
 - Register providers by capability first, then route by intent. Fallback is allowed only within the same capability.
-- Keep xAI Responses and OpenAI-compatible as peer `main_search` providers. A failed xAI Responses request may fall back to OpenAI-compatible only when `OPENAI_COMPATIBLE_API_URL` and `OPENAI_COMPATIBLE_API_KEY` are separately configured.
+- Keep the xAI multi-protocol channel and OpenAI-compatible as peer `main_search` providers. A failed xAI-channel request may fall back to OpenAI-compatible only when `OPENAI_COMPATIBLE_API_URL` and `OPENAI_COMPATIBLE_API_KEY` are separately configured.
 - Do not use Context7 for broad news or generic web facts; do not use Tavily or Firecrawl as documentation semantic-search replacements.
 - Standard installs must fail closed unless `main_search`, `docs_search`, and fetch capability each have at least one configured provider.
 - After provider-routing changes, run source-checkout regression plus `agent-search smoke --mock --format json`. If live keys were used, run a targeted secret scan for exact key substrings before committing.

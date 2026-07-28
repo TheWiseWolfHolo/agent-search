@@ -732,18 +732,39 @@ def _configured_main_search_provider_ids() -> list[str]:
     return [provider for provider in MAIN_SEARCH_FALLBACK_CHAIN if provider in configured]
 
 
-def _main_search_provider_configs(model_override: str = "", providers: str = "auto") -> list[dict[str, Any]]:
+def _main_search_provider_configs(
+    model_override: str = "",
+    providers: str = "auto",
+    api_format: str = "",
+    reasoning_effort: str | None = None,
+) -> list[dict[str, Any]]:
     provider_filter = _parse_provider_filter(providers)
     by_provider: dict[str, dict[str, Any]] = {}
 
     if config.xai_api_key:
+        xai_api_format = config.normalize_xai_api_format(api_format) if api_format else config.xai_api_format
+        xai_reasoning_effort = (
+            config.xai_reasoning_effort
+            if reasoning_effort is None
+            else (reasoning_effort.strip() or None)
+        )
+        xai_tools = config.parse_xai_tools(config.xai_tools_raw)
+        if xai_api_format == "responses":
+            xai_ignored_tools: list[str] = []
+        elif xai_api_format == "chat-completions":
+            xai_ignored_tools = list(xai_tools)
+        else:
+            xai_ignored_tools = [tool for tool in xai_tools if tool != "web_search"]
         by_provider["xai-responses"] = {
             "provider": "xai-responses",
-            "mode": "xai-responses",
+            "mode": f"xai-{xai_api_format}",
             "api_url": config.xai_api_url,
             "api_key": config.xai_api_key,
             "model": model_override or config.xai_model,
-            "tools": config.parse_xai_tools(config.xai_tools_raw),
+            "tools": xai_tools,
+            "ignored_tools": xai_ignored_tools,
+            "api_format": xai_api_format,
+            "reasoning_effort": xai_reasoning_effort,
             "source": "XAI_*",
         }
 
@@ -759,11 +780,19 @@ def _main_search_provider_configs(model_override: str = "", providers: str = "au
             "source": "OPENAI_COMPATIBLE_*",
         }
 
-    return [
+    selected_configs = [
         by_provider[provider]
         for provider in MAIN_SEARCH_FALLBACK_CHAIN
         if provider in by_provider and _provider_allowed(provider, provider_filter)
     ]
+    if (api_format or reasoning_effort is not None) and not any(
+        item["provider"] == "xai-responses" for item in selected_configs
+    ):
+        raise ValueError(
+            "--api-format and --reasoning-effort apply only to a configured xAI channel; "
+            "select it with --providers xai."
+        )
+    return selected_configs
 
 
 def _main_search_providers(provider_configs: list[dict[str, Any]], fallback: str) -> list[Any]:
@@ -777,6 +806,8 @@ def _main_search_providers(provider_configs: list[dict[str, Any]], fallback: str
                     provider_config["api_key"],
                     provider_config["model"],
                     provider_config["tools"],
+                    api_format=provider_config["api_format"],
+                    reasoning_effort=provider_config.get("reasoning_effort"),
                 )
             )
         else:
@@ -1144,6 +1175,8 @@ async def search(
     fallback: str = "",
     providers: str = "auto",
     stream: bool | None = None,
+    api_format: str = "",
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     start = time.time()
     session_id = new_session_id()
@@ -1173,7 +1206,12 @@ async def search(
         )
 
     try:
-        main_provider_configs = _main_search_provider_configs(model_override=model, providers=providers)
+        main_provider_configs = _main_search_provider_configs(
+            model_override=model,
+            providers=providers,
+            api_format=api_format,
+            reasoning_effort=reasoning_effort,
+        )
     except ValueError as e:
         return _empty_search_result(start, session_id, query, "parameter_error", str(e), extra={"validation_level": validation_level})
 
@@ -1232,6 +1270,30 @@ async def search(
         "fallback_mode": fallback_mode,
         "providers": providers,
         "main_search_chain": [item["provider"] for item in selected_main_provider_configs],
+        "xai_api_format": next(
+            (
+                item["api_format"]
+                for item in selected_main_provider_configs
+                if item["provider"] == "xai-responses"
+            ),
+            "",
+        ),
+        "xai_reasoning_effort": next(
+            (
+                item.get("reasoning_effort") or ""
+                for item in selected_main_provider_configs
+                if item["provider"] == "xai-responses"
+            ),
+            "",
+        ),
+        "xai_ignored_tools": next(
+            (
+                list(item.get("ignored_tools", []))
+                for item in selected_main_provider_configs
+                if item["provider"] == "xai-responses"
+            ),
+            [],
+        ),
         "openai_compatible_stream": next((bool(item.get("stream")) for item in selected_main_provider_configs if item["provider"] == "openai-compatible"), False),
     }
 
@@ -1988,27 +2050,65 @@ async def _test_primary_connection(api_url: str, api_key: str, model: str) -> di
 
 
 async def _test_primary_responses(api_url: str, api_key: str, model: str) -> dict[str, Any]:
-    responses_url = f"{api_url.rstrip('/')}/responses"
+    return await _test_xai_protocol_connection(
+        {
+            "provider": "xai-responses",
+            "mode": "xai-responses",
+            "api_url": api_url,
+            "api_key": api_key,
+            "model": model,
+            "api_format": "responses",
+            "reasoning_effort": None,
+        }
+    )
+
+
+async def _test_xai_protocol_connection(provider_config: dict[str, Any]) -> dict[str, Any]:
+    api_format = provider_config["api_format"]
+    provider = XAIResponsesSearchProvider(
+        provider_config["api_url"],
+        provider_config["api_key"],
+        provider_config["model"],
+        tools=[],
+        api_format=api_format,
+        reasoning_effort=provider_config.get("reasoning_effort"),
+    )
+    request_url = provider._request_url()
+    payload = provider._build_search_payload("Reply with exactly: ok")
     start = time.time()
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with httpx.AsyncClient(
+        timeout=20.0,
+        follow_redirects=True,
+        verify=provider._get_ssl_verify(),
+    ) as client:
         response = await client.post(
-            responses_url,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json={
-                "model": model,
-                "input": [{"role": "user", "content": "Reply with exactly: ok"}],
-                "stream": False,
-            },
+            request_url,
+            headers=provider._build_api_headers(),
+            json=payload,
         )
         response_time = _elapsed_ms(start)
         if response.status_code != 200:
-            return {"status": "warning", "message": f"HTTP {response.status_code}: {response.text[:100]}", "response_time_ms": response_time}
-        return {"status": "ok", "message": f"xAI Responses API 可用 (HTTP {response.status_code})", "response_time_ms": response_time}
+            return {
+                "status": "warning",
+                "message": f"HTTP {response.status_code}: {response.text[:100]}",
+                "response_time_ms": response_time,
+                "api_format": api_format,
+                "reasoning_effort_tested": provider.reasoning_effort or "",
+                "tools_tested": False,
+            }
+        return {
+            "status": "ok",
+            "message": f"xAI channel {api_format} API 可用 (HTTP {response.status_code})",
+            "response_time_ms": response_time,
+            "api_format": api_format,
+            "reasoning_effort_tested": provider.reasoning_effort or "",
+            "tools_tested": False,
+        }
 
 
 async def _test_main_provider_connection(provider_config: dict[str, Any]) -> dict[str, Any]:
-    if provider_config["mode"] == "xai-responses":
-        return await _test_primary_responses(provider_config["api_url"], provider_config["api_key"], provider_config["model"])
+    if provider_config["provider"] == "xai-responses":
+        return await _test_xai_protocol_connection(provider_config)
     return await _test_primary_connection(provider_config["api_url"], provider_config["api_key"], provider_config["model"])
 
 

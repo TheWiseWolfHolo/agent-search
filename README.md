@@ -78,7 +78,7 @@ agent-search skills update --targets codex --format json
 
 | Capability | Commands | Providers | Role |
 | --- | --- | --- | --- |
-| `main_search` | `search` | xAI Responses, OpenAI-compatible Chat Completions | Broad answer synthesis and live search |
+| `main_search` | `search` | xAI multi-protocol channel (Responses by default), OpenAI-compatible Chat Completions | Broad answer synthesis and live search |
 | `docs_search` | `context7-library`, `context7-docs`, `exa-search` | Context7, Exa | SDK, API, framework, official-domain, paper, and product-page discovery |
 | `web_search` | `search --extra-sources` | Tavily, Firecrawl | Current, domain-filtered, and supplementary web-source discovery |
 | `web_fetch` | `fetch` | Tavily, Firecrawl | Known URL extraction for evidence |
@@ -94,7 +94,7 @@ Normal users should run `agent-search setup`. Advanced users and CI can set the 
 
 | Provider | Main keys | Docs | Keys |
 | --- | --- | --- | --- |
-| xAI Responses | `XAI_API_KEY`, `XAI_API_URL`, `XAI_MODEL`, `XAI_TOOLS` | https://docs.x.ai/docs | https://console.x.ai/team/default/api-keys |
+| xAI multi-protocol channel | `XAI_API_KEY`, `XAI_API_URL`, `XAI_MODEL`, `XAI_TOOLS`, `XAI_API_FORMAT`, `XAI_REASONING_EFFORT` | https://docs.x.ai/docs | https://console.x.ai/team/default/api-keys |
 | OpenAI-compatible Chat Completions | `OPENAI_COMPATIBLE_API_URL`, `OPENAI_COMPATIBLE_API_KEY`, `OPENAI_COMPATIBLE_MODEL`, `OPENAI_COMPATIBLE_STREAM` | https://platform.openai.com/docs | https://platform.openai.com/api-keys |
 | Exa | `EXA_API_KEY`, `EXA_BASE_URL` | https://docs.exa.ai/ | https://dashboard.exa.ai/api-keys |
 | Context7 | `CONTEXT7_API_KEY`, `CONTEXT7_BASE_URL` | https://context7.com/docs | https://context7.com/ |
@@ -122,9 +122,38 @@ For migration, if a new Agent Search config does not exist, the CLI can read a l
 
 Secrets are masked in command output. Do not commit provider keys.
 
+### xAI request formats and reasoning effort
+
+`XAI_API_FORMAT` selects the wire format used by the `XAI_*` channel. Missing or blank values default to canonical `responses`. Configuration accepts the following aliases, while canonical names are preferred in scripts:
+
+| Canonical format | Accepted aliases | Endpoint and authentication | Native reasoning field | `XAI_TOOLS` mapping |
+| --- | --- | --- | --- | --- |
+| `responses` | `response`, `responses` | `/responses`; `Authorization: Bearer` | `reasoning.effort` | Sends `web_search` and `x_search` as native tool types |
+| `chat-completions` | `chatcompletion`, `chatcompletions`, `chat-completion`, `chat-completions`, `chat_completion`, `chat_completions` | `/chat/completions`; `Authorization: Bearer` | top-level `reasoning_effort` | Does not send `XAI_TOOLS` because this generic request shape has no selected equivalent |
+| `messages` | `message`, `messages`, `anthropic` | `/messages`; `x-api-key` plus `anthropic-version` | `output_config.effort` (does not force a thinking mode) | Maps only `web_search` to `web_search_20250305`; omits `x_search` |
+| `google` | `google`, `gemini`, `generate-content`, `generate_content`, `generatecontent` | `/models/{model}:generateContent`; `x-goog-api-key` | `generationConfig.thinkingConfig.thinkingLevel` | Maps only `web_search` to `googleSearch`; omits `x_search` |
+
+Protocol references: [xAI reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning), [OpenAI Responses](https://developers.openai.com/api/reference/resources/responses/methods/create), [OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create), [Claude effort](https://platform.claude.com/docs/en/build-with-claude/effort), and [Gemini thinking](https://ai.google.dev/gemini-api/docs/thinking).
+
+`XAI_REASONING_EFFORT` is optional and is passed through to the native field for the selected format (Google receives its upper-case thinking level). If it is blank or not configured, the request body contains no reasoning/thinking field at all.
+
+Override either value for one search with `--api-format` and `--reasoning-effort`:
+
+```powershell
+agent-search search "compare current model APIs" --api-format messages --reasoning-effort high --format json
+```
+
+Omitting `--api-format` uses `XAI_API_FORMAT`; omitting `--reasoning-effort` uses `XAI_REASONING_EFFORT`. If both the flag and configuration are blank, no effort field is sent. Clear a previously saved effort with `agent-search config unset XAI_REASONING_EFFORT`. The `search` command's default hard timeout is 180 seconds.
+
+Non-interactive setup exposes the same settings:
+
+```powershell
+agent-search setup --non-interactive --xai-api-format google --xai-reasoning-effort high
+```
+
 Provider boundaries:
 
-- Official xAI live search uses the Responses API through `XAI_*`.
+- The `XAI_*` channel defaults to Responses and can explicitly use `responses`, `chat-completions`, `messages`, or `google` request format.
 - OpenAI-compatible relays use Chat Completions through `OPENAI_COMPATIBLE_*`.
 - `OPENAI_COMPATIBLE_STREAM=true`, `agent-search search --stream`, and `agent-search search --no-stream` only affect OpenAI-compatible search/fetch transport.
 - `web_search` reinforcement uses Tavily first, then Firecrawl when both are configured.

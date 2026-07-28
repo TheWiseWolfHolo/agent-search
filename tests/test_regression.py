@@ -297,6 +297,43 @@ def test_web_source_reinforcement_contract_public_and_packaged_assets_match():
         assert marker in readme_zh
 
 
+def test_xai_multi_protocol_contract_is_distributable():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    public_text = _read_skill_tree(PUBLIC_SKILL_DIR)
+    packaged_text = _read_skill_tree(PACKAGED_SKILL_DIR)
+    public_contract = (PUBLIC_SKILL_DIR / "references" / "cli-contract.md").read_text(encoding="utf-8")
+    packaged_contract = (PACKAGED_SKILL_DIR / "references" / "cli-contract.md").read_text(encoding="utf-8")
+
+    required_markers = [
+        "XAI_API_FORMAT",
+        "XAI_REASONING_EFFORT",
+        "--api-format",
+        "--reasoning-effort",
+        "chat-completions",
+        "web_search_20250305",
+        "googleSearch",
+    ]
+    for marker in required_markers:
+        assert marker in readme
+        assert marker in public_text
+        assert marker in packaged_text
+        assert marker in public_contract
+        assert marker in packaged_contract
+    assert "default hard timeout is 180 seconds" in readme
+    for text in (public_text, packaged_text, public_contract, packaged_contract):
+        assert "180-second default hard timeout" in text
+
+    for marker in [
+        "XAI_API_FORMAT",
+        "XAI_REASONING_EFFORT",
+        "--api-format",
+        "--reasoning-effort",
+        "请求体完全不包含 reasoning/thinking 字段",
+    ]:
+        assert marker in readme_zh
+
+
 def test_streaming_and_anysearch_contract_public_and_packaged_assets_match():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")

@@ -12,10 +12,29 @@ class Config:
     )
     _DEFAULT_MODEL = "grok-4-fast"
     _DEFAULT_XAI_TOOLS = "web_search,x_search"
+    _DEFAULT_XAI_API_FORMAT = "responses"
     _DEFAULT_VALIDATION_LEVEL = "balanced"
     _DEFAULT_FALLBACK_MODE = "auto"
     _DEFAULT_MINIMUM_PROFILE = "standard"
     _ALLOWED_XAI_TOOLS = {"web_search", "x_search"}
+    _XAI_API_FORMAT_ALIASES = {
+        "response": "responses",
+        "responses": "responses",
+        "chatcompletion": "chat-completions",
+        "chatcompletions": "chat-completions",
+        "chat-completion": "chat-completions",
+        "chat-completions": "chat-completions",
+        "chat_completion": "chat-completions",
+        "chat_completions": "chat-completions",
+        "message": "messages",
+        "messages": "messages",
+        "anthropic": "messages",
+        "google": "google",
+        "gemini": "google",
+        "generate-content": "google",
+        "generate_content": "google",
+        "generatecontent": "google",
+    }
     _ALLOWED_VALIDATION_LEVELS = {"fast", "balanced", "strict"}
     _ALLOWED_FALLBACK_MODES = {"auto", "off"}
     _ALLOWED_MINIMUM_PROFILES = {"standard", "off"}
@@ -24,6 +43,8 @@ class Config:
         "XAI_API_KEY",
         "XAI_MODEL",
         "XAI_TOOLS",
+        "XAI_API_FORMAT",
+        "XAI_REASONING_EFFORT",
         "OPENAI_COMPATIBLE_API_URL",
         "OPENAI_COMPATIBLE_API_KEY",
         "OPENAI_COMPATIBLE_MODEL",
@@ -223,6 +244,8 @@ class Config:
             "XAI_API_KEY",
             "XAI_MODEL",
             "XAI_TOOLS",
+            "XAI_API_FORMAT",
+            "XAI_REASONING_EFFORT",
             "OPENAI_COMPATIBLE_API_URL",
             "OPENAI_COMPATIBLE_API_KEY",
             "OPENAI_COMPATIBLE_MODEL",
@@ -248,6 +271,8 @@ class Config:
             "XAI_API_KEY",
             "XAI_MODEL",
             "XAI_TOOLS",
+            "XAI_API_FORMAT",
+            "XAI_REASONING_EFFORT",
             "OPENAI_COMPATIBLE_API_URL",
             "OPENAI_COMPATIBLE_API_KEY",
             "OPENAI_COMPATIBLE_MODEL",
@@ -305,6 +330,28 @@ class Config:
     @property
     def xai_tools_raw(self) -> str:
         return self._get_config_value("XAI_TOOLS", self._DEFAULT_XAI_TOOLS) or self._DEFAULT_XAI_TOOLS
+
+    @classmethod
+    def normalize_xai_api_format(cls, value: str | None) -> str:
+        raw = (value or "").strip().lower()
+        if not raw:
+            return cls._DEFAULT_XAI_API_FORMAT
+        normalized = cls._XAI_API_FORMAT_ALIASES.get(raw)
+        if normalized:
+            return normalized
+        allowed = ", ".join(("responses", "chat-completions", "messages", "google"))
+        raise ValueError(f"Invalid XAI_API_FORMAT: {raw}. Supported values: {allowed}")
+
+    @property
+    def xai_api_format(self) -> str:
+        return self.normalize_xai_api_format(
+            self._get_config_value("XAI_API_FORMAT", self._DEFAULT_XAI_API_FORMAT)
+        )
+
+    @property
+    def xai_reasoning_effort(self) -> str | None:
+        value = (self._get_config_value("XAI_REASONING_EFFORT") or "").strip()
+        return value or None
 
     @property
     def openai_compatible_api_url(self) -> str | None:
@@ -518,7 +565,26 @@ class Config:
             self._DEFAULT_MINIMUM_PROFILE,
             self._ALLOWED_MINIMUM_PROFILES,
         )
-        config_parameter_errors.extend(error for error in (validation_error, fallback_error, minimum_error) if error)
+        raw_xai_api_format = self._get_config_value(
+            "XAI_API_FORMAT",
+            self._DEFAULT_XAI_API_FORMAT,
+        )
+        try:
+            xai_api_format = self.normalize_xai_api_format(raw_xai_api_format)
+            xai_api_format_error = ""
+        except ValueError as e:
+            xai_api_format = (raw_xai_api_format or "").strip().lower()
+            xai_api_format_error = str(e)
+        config_parameter_errors.extend(
+            error
+            for error in (
+                validation_error,
+                fallback_error,
+                minimum_error,
+                xai_api_format_error,
+            )
+            if error
+        )
         if config_parameter_errors and config_status.startswith("ok:"):
             config_status = f"config_error: {'; '.join(config_parameter_errors)}"
 
@@ -527,6 +593,8 @@ class Config:
             "XAI_API_KEY": self._mask_api_key(self.xai_api_key) if self.xai_api_key else "未配置",
             "XAI_MODEL": self.xai_model,
             "XAI_TOOLS": self.xai_tools_raw,
+            "XAI_API_FORMAT": xai_api_format,
+            "XAI_REASONING_EFFORT": self.xai_reasoning_effort or "未配置",
             "OPENAI_COMPATIBLE_API_URL": self.openai_compatible_api_url or "未配置",
             "OPENAI_COMPATIBLE_API_KEY": self._mask_api_key(self.openai_compatible_api_key) if self.openai_compatible_api_key else "未配置",
             "OPENAI_COMPATIBLE_MODEL": self.openai_compatible_model,
@@ -558,7 +626,7 @@ class Config:
             "CONTEXT7_API_KEY": self._mask_api_key(self.context7_api_key) if self.context7_api_key else "未配置",
             "CONTEXT7_BASE_URL": self.context7_base_url,
             "CONTEXT7_TIMEOUT_SECONDS": self.context7_timeout,
-            "primary_api_mode": "xai-responses" if self.xai_api_key else ("chat-completions" if self.openai_compatible_api_url and self.openai_compatible_api_key else "未配置"),
+            "primary_api_mode": f"xai-{xai_api_format}" if self.xai_api_key else ("chat-completions" if self.openai_compatible_api_url and self.openai_compatible_api_key else "未配置"),
             "primary_api_mode_source": "config_file" if explicit_main_configured else "default",
             "config_file": str(self.config_file),
             "config_dir": str(self.config_file.parent),

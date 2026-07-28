@@ -135,17 +135,23 @@ agent-search deep "https://example.com/source" --format json
 
 ## Provider Routing
 
-- `search` builds `main_search` from configured peer providers: `XAI_API_KEY` for xAI Responses and `OPENAI_COMPATIBLE_API_URL` + `OPENAI_COMPATIBLE_API_KEY` for OpenAI-compatible Chat Completions.
+- `search` builds `main_search` from configured peer providers: `XAI_API_KEY` for the xAI multi-protocol channel and `OPENAI_COMPATIBLE_API_URL` + `OPENAI_COMPATIBLE_API_KEY` for OpenAI-compatible Chat Completions.
 - `search` is the default first hop for broad exploration, current synthesis, and routing metadata.
-- Official xAI uses the Responses API `/responses` route through `XAI_*`. Compatible relays/gateways use Chat Completions `/chat/completions` through `OPENAI_COMPATIBLE_*`.
-- `OPENAI_COMPATIBLE_STREAM=true` or `search --stream` sets `stream=true` only for OpenAI-compatible `search` and provider-side `fetch`; it is a relay compatibility switch and does not affect xAI Responses, URL description, or source ranking.
+- `XAI_API_FORMAT` selects the xAI channel wire format and defaults to `responses` when missing or blank. Its canonical values are `responses`, `chat-completions`, `messages`, and `google`; common aliases are normalized by config.
+- `search --api-format FORMAT` overrides `XAI_API_FORMAT` for one request. `search --reasoning-effort EFFORT` overrides optional `XAI_REASONING_EFFORT`; when neither provides a nonblank value, the request body must omit every reasoning/thinking field.
+- Native xAI-channel request mappings are:
+  - `responses`: `/responses`, Bearer auth, optional `reasoning.effort`; sends configured `web_search` and `x_search`.
+  - `chat-completions`: `/chat/completions`, Bearer auth, optional top-level `reasoning_effort`; does not send `XAI_TOOLS`.
+  - `messages`: `/messages`, `x-api-key` plus `anthropic-version`, optional `output_config.effort` without forcing a thinking mode; maps only `web_search` to `web_search_20250305` and omits `x_search`.
+  - `google`: `/models/{model}:generateContent`, `x-goog-api-key`, optional `generationConfig.thinkingConfig.thinkingLevel`; maps only `web_search` to `googleSearch` and omits `x_search`.
+- The separate `OPENAI_COMPATIBLE_*` peer provider continues to use Chat Completions `/chat/completions`.
+- `OPENAI_COMPATIBLE_STREAM=true` or `search --stream` sets `stream=true` only for OpenAI-compatible `search` and provider-side `fetch`; it is a relay compatibility switch and does not affect the xAI channel, URL description, or source ranking.
 - Legacy `AGENT_SEARCH_API_URL`, `AGENT_SEARCH_API_KEY`, `AGENT_SEARCH_API_MODE`, `AGENT_SEARCH_MODEL`, and `AGENT_SEARCH_XAI_TOOLS` are unsupported config keys.
-- xAI Responses mode may use only `XAI_TOOLS=web_search,x_search` and a subset of those tools.
-- Chat Completions mode must not send xAI `web_search` / `x_search` tools or legacy `search_parameters`; xAI Chat Completions Live Search is deprecated.
+- `XAI_TOOLS` accepts only `web_search` and `x_search`. Do not send `x_search` through Messages or Google, where no equivalent is mapped.
 - The standard minimum profile requires one configured provider in each of `main_search`, `docs_search`, and fetch capability. Missing required capabilities should be treated as a hard configuration failure.
 - AnySearch is reported only as optional experimental `vertical_search`; it is not part of the `web_search` fallback and is not required by the `standard` minimum profile.
 - `search` exposes `--validation fast|balanced|strict`, `--fallback auto|off`, and `--providers auto|CSV`. Default validation is `balanced`; fallback only happens within the same capability.
-- xAI Responses is the default main answer route for Grok/xAI. In `fallback=auto`, a failed xAI Responses main route can fall back to OpenAI-compatible only when the OpenAI-compatible provider is separately configured.
+- The xAI channel, using Responses by default, is the first main answer route for Grok/xAI. In `fallback=auto`, a failed xAI-channel request can fall back to OpenAI-compatible only when the OpenAI-compatible provider is separately configured.
 - Docs/API/library routing should prefer Context7 first. Exa is for official-domain or low-noise supplemental discovery, not the default docs answer route.
 - `web_search` reinforcement is a same-capability Tavily -> Firecrawl chain for current, domain-filtered, and supplementary web-source discovery.
 - `search` calls Tavily and/or Firecrawl only when `--extra-sources N` is greater than 0.
@@ -177,7 +183,7 @@ agent-search exa-search "Reuters Iran Hormuz latest" --num-results 5 --include-h
 agent-search exa-search "OpenAI Responses API documentation" --include-domains platform.openai.com developers.openai.com --num-results 5 --include-text --format json
 agent-search exa-similar "https://example.com/source" --num-results 5 --format json
 agent-search fetch "https://example.com/source" --format json --output C:\tmp\agent-search-evidence\source-fetch.json
-agent-search search "Iran Hormuz latest military talks" --extra-sources 3 --timeout 90 --format json --output C:\tmp\agent-search-evidence\iran-hormuz-search.json
+agent-search search "Iran Hormuz latest military talks" --extra-sources 3 --timeout 180 --format json --output C:\tmp\agent-search-evidence\iran-hormuz-search.json
 ```
 
 ## Local wrapper contract
@@ -194,10 +200,12 @@ agent-search search "Iran Hormuz latest military talks" --extra-sources 3 --time
 - Earlier Windows source defaults used `~\.config\agent-search\config.json`, while some installs were already pinned to `%LOCALAPPDATA%\agent-search` through `AGENT_SEARCH_CONFIG_DIR`. If the new default file is missing but the old file exists, `doctor` reports `legacy_windows_home` as the active source so upgrades do not silently lose configuration. It also reports the override value and whether it matches the current default.
 - Use `agent-search doctor --format json` for agent/script parsing and `agent-search doctor --format markdown` when a human wants a detailed diagnostic report.
 - If `agent-search doctor --format json` returns `ok: false`, follow the `error` field's guidance (`agent-search setup` or `agent-search config set KEY VALUE`); do not silently fall back to native web search.
+- `agent-search search` has a 180-second default hard timeout. Use `--timeout SECONDS` only when the current provider or task needs a different bound.
 - Use `agent-search diagnose openai-compatible --format markdown` when `doctor` succeeds but OpenAI-compatible `search` appears to hang, returns a timeout, or differs between `--stream` and `--no-stream`. It is the beginner-facing one-command report for upstream/relay compatibility.
 - Interactive `agent-search setup` is a language-selecting grouped wizard with arrow-key / Space / Enter provider selection. It guides users through required `main_search`, `docs_search`, and fetch capability, then optional `web_search` reinforcement.
 - The setup wizard prints beginner filling examples for official-service and relay/pooled-endpoint minimum profiles. Keep that guidance on stderr so stdout remains parseable JSON/Markdown/content output.
 - Use `agent-search setup --lang en` for an English wizard and `agent-search setup --advanced` only when low-level config keys must be shown one by one.
+- Use `agent-search setup --non-interactive --xai-api-format FORMAT --xai-reasoning-effort EFFORT` to persist the xAI channel wire format and optional reasoning effort. Leave effort unconfigured when requests must contain no reasoning/thinking field; if it was configured earlier, run `agent-search config unset XAI_REASONING_EFFORT`.
 - Use `agent-search setup --non-interactive --openai-compatible-stream true` only when an OpenAI-compatible relay benefits from SSE streaming for long requests. Default remains false.
 - Use `agent-search setup --non-interactive --anysearch-api-url "https://api.anysearch.com/mcp" --anysearch-key "key"` only for experimental AnySearch acceptance; do not add it to the normal minimum-profile setup.
 - Interactive setup keeps `web_search` reinforcement focused on Tavily and Firecrawl, while AnySearch remains an optional `vertical_search` experiment.
@@ -208,10 +216,11 @@ agent-search search "Iran Hormuz latest military talks" --extra-sources 3 --time
 ## Command Patterns
 
 ```powershell
-agent-search search "query" --extra-sources 5 --timeout 90 --format json --output result.json
+agent-search search "query" --extra-sources 5 --timeout 180 --format json --output result.json
+agent-search search "query" --api-format responses --reasoning-effort high --format json
 agent-search search "query" --stream --format json
 agent-search diagnose openai-compatible --format markdown
-agent-search search "query" --platform "Reuters" --model "model-id" --extra-sources 3 --timeout 90 --format json
+agent-search search "query" --platform "Reuters" --model "model-id" --extra-sources 3 --timeout 180 --format json
 agent-search search "nba战报" --format content
 agent-search search "query" --validation strict --fallback auto --providers auto --format json
 agent-search exa-search "query" --num-results 5 --search-type neural --include-text --include-highlights --include-domains docs.example.com developer.mozilla.org --format json
@@ -228,6 +237,7 @@ agent-search setup
 agent-search setup --lang en
 agent-search setup --advanced
 agent-search setup --non-interactive --install-skills hermes
+agent-search setup --non-interactive --xai-api-format messages --xai-reasoning-effort high
 agent-search skills status --targets codex --format json
 agent-search skills update --targets codex --format json
 agent-search skills update --all --format json
@@ -241,6 +251,9 @@ agent-search config list --format markdown
 agent-search config set XAI_API_KEY "key" --format json
 agent-search config set XAI_MODEL "grok-4-fast" --format json
 agent-search config set XAI_TOOLS "web_search,x_search" --format json
+agent-search config set XAI_API_FORMAT "responses" --format json
+agent-search config set XAI_REASONING_EFFORT "high" --format json
+agent-search config unset XAI_REASONING_EFFORT --format json
 agent-search config set OPENAI_COMPATIBLE_API_URL "https://api.openai.com/v1" --format json
 agent-search config set OPENAI_COMPATIBLE_API_KEY "key" --format json
 agent-search config set OPENAI_COMPATIBLE_MODEL "model-id" --format json
@@ -320,7 +333,7 @@ agent-search fetch "https://example.com/source" --format markdown --output fetch
 - Do not use legacy MCP tool names in prompts, notes, or generated instructions for this workflow.
 - Treat key rotation as a hard safety gate when previous key values were pasted into chat or logs.
 - For provider architecture maintenance, verify the distributable contract rather than the current developer machine's wrappers or local config. Keep fallback same-capability only.
-- Treat xAI Responses and OpenAI-compatible as peer `main_search` providers. Do not reuse one provider's URL/key to fabricate the other provider as a fallback.
+- Treat the xAI multi-protocol channel and OpenAI-compatible as peer `main_search` providers. Do not reuse one provider's URL/key to fabricate the other provider as a fallback.
 
 ## Supporting Reference
 
