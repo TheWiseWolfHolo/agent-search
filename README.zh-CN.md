@@ -78,7 +78,7 @@ agent-search skills update --targets codex --format json
 
 | 能力 | 命令 | Provider | 用途 |
 | --- | --- | --- | --- |
-| `main_search` | `search` | xAI Responses、OpenAI-compatible Chat Completions | 综合回答、快速联网搜索 |
+| `main_search` | `search` | xAI 多协议渠道（默认 Responses）、OpenAI-compatible Chat Completions | 综合回答、快速联网搜索 |
 | `docs_search` | `context7-library`、`context7-docs`、`exa-search` | Context7、Exa | SDK、API、框架、官方域名、论文、产品页 |
 | `web_search` | `search --extra-sources` | Tavily、Firecrawl | 时效、域名过滤和补充网页来源 |
 | `web_fetch` | `fetch` | Tavily、Firecrawl | 已知 URL 正文抓取 |
@@ -94,7 +94,7 @@ agent-search skills update --targets codex --format json
 
 | Provider | 主要配置 | 文档 | Key |
 | --- | --- | --- | --- |
-| xAI Responses | `XAI_API_KEY`、`XAI_API_URL`、`XAI_MODEL`、`XAI_TOOLS` | https://docs.x.ai/docs | https://console.x.ai/team/default/api-keys |
+| xAI 多协议渠道 | `XAI_API_KEY`、`XAI_API_URL`、`XAI_MODEL`、`XAI_TOOLS`、`XAI_API_FORMAT`、`XAI_REASONING_EFFORT` | https://docs.x.ai/docs | https://console.x.ai/team/default/api-keys |
 | OpenAI-compatible Chat Completions | `OPENAI_COMPATIBLE_API_URL`、`OPENAI_COMPATIBLE_API_KEY`、`OPENAI_COMPATIBLE_MODEL`、`OPENAI_COMPATIBLE_STREAM` | https://platform.openai.com/docs | https://platform.openai.com/api-keys |
 | Exa | `EXA_API_KEY`、`EXA_BASE_URL` | https://docs.exa.ai/ | https://dashboard.exa.ai/api-keys |
 | Context7 | `CONTEXT7_API_KEY`、`CONTEXT7_BASE_URL` | https://context7.com/docs | https://context7.com/ |
@@ -122,9 +122,38 @@ Agent Search 自身使用 `AGENT_SEARCH_*`：
 
 命令输出会遮蔽 secrets。不要把 provider key 提交到仓库。
 
+### xAI 请求格式与思考强度
+
+`XAI_API_FORMAT` 决定 `XAI_*` 渠道使用的请求格式。未配置或留空时默认使用 canonical `responses`。配置支持下列常见别名；脚本中建议使用 canonical 名称：
+
+| Canonical 格式 | 可接受别名 | 端点与鉴权 | 原生思考强度字段 | `XAI_TOOLS` 映射 |
+| --- | --- | --- | --- | --- |
+| `responses` | `response`、`responses` | `/responses`；`Authorization: Bearer` | `reasoning.effort` | 原生发送 `web_search` 和 `x_search` |
+| `chat-completions` | `chatcompletion`、`chatcompletions`、`chat-completion`、`chat-completions`、`chat_completion`、`chat_completions` | `/chat/completions`；`Authorization: Bearer` | 顶层 `reasoning_effort` | 该通用请求结构没有选用等价工具，因此不发送 `XAI_TOOLS` |
+| `messages` | `message`、`messages`、`anthropic` | `/messages`；`x-api-key` 与 `anthropic-version` | `output_config.effort`（不会强制开启某种 thinking 模式） | 只把 `web_search` 映射为 `web_search_20250305`；不发送 `x_search` |
+| `google` | `google`、`gemini`、`generate-content`、`generate_content`、`generatecontent` | `/models/{model}:generateContent`；`x-goog-api-key` | `generationConfig.thinkingConfig.thinkingLevel` | 只把 `web_search` 映射为 `googleSearch`；不发送 `x_search` |
+
+协议参考：[xAI reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning)、[OpenAI Responses](https://developers.openai.com/api/reference/resources/responses/methods/create)、[OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)、[Claude effort](https://platform.claude.com/docs/en/build-with-claude/effort) 和 [Gemini thinking](https://ai.google.dev/gemini-api/docs/thinking)。
+
+`XAI_REASONING_EFFORT` 是可选配置，会映射到所选格式的原生字段（Google 的 thinking level 会转成大写）。它未配置或为空时，请求体完全不包含 reasoning/thinking 字段。
+
+单次搜索可以用 `--api-format` 和 `--reasoning-effort` 覆盖配置：
+
+```powershell
+agent-search search "比较当前模型 API" --api-format messages --reasoning-effort high --format json
+```
+
+不传 `--api-format` 时使用 `XAI_API_FORMAT`；不传 `--reasoning-effort` 时使用 `XAI_REASONING_EFFORT`。如果 flag 和配置都为空，就不会发送思考强度字段。此前保存过强度时，可用 `agent-search config unset XAI_REASONING_EFFORT` 清除。`search` 的默认硬超时为 180 秒。
+
+非交互 setup 提供对应参数：
+
+```powershell
+agent-search setup --non-interactive --xai-api-format google --xai-reasoning-effort high
+```
+
 Provider 边界：
 
-- xAI 官方联网搜索走 Responses API，通过 `XAI_*` 配置。
+- `XAI_*` 渠道默认走 Responses，也可以显式选择 `responses`、`chat-completions`、`messages` 或 `google` 请求格式。
 - OpenAI-compatible 中转走 Chat Completions，通过 `OPENAI_COMPATIBLE_*` 配置。
 - `OPENAI_COMPATIBLE_STREAM=true`、`agent-search search --stream`、`agent-search search --no-stream` 只影响 OpenAI-compatible 的 search/fetch 传输。
 - `web_search` 补充来源优先使用 Tavily，两者都配置时再用 Firecrawl 作为同能力兜底。

@@ -1410,8 +1410,30 @@ def _prompt_main_search(values: dict[str, str], current: dict[str, str], lang: s
         values["XAI_API_KEY"] = _prompt_value("XAI_API_KEY", "xAI API key", current.get("XAI_API_KEY", ""), lang=lang)
         values["XAI_MODEL"] = _prompt_value(
             "XAI_MODEL",
-            _t(lang, "xAI Responses 模型", "xAI Responses model"),
+            _t(lang, "xAI 渠道模型", "xAI channel model"),
             current.get("XAI_MODEL", ""),
+            optional=True,
+            lang=lang,
+        )
+        values["XAI_API_FORMAT"] = _prompt_value(
+            "XAI_API_FORMAT",
+            _t(
+                lang,
+                "xAI 请求格式（responses/chat-completions/messages/google，留空默认 responses）",
+                "xAI request format (responses/chat-completions/messages/google; blank defaults to responses)",
+            ),
+            current.get("XAI_API_FORMAT", ""),
+            optional=True,
+            lang=lang,
+        )
+        values["XAI_REASONING_EFFORT"] = _prompt_value(
+            "XAI_REASONING_EFFORT",
+            _t(
+                lang,
+                "xAI 思考强度（留空则请求中不传）",
+                "xAI reasoning effort (blank omits it from the request)",
+            ),
+            current.get("XAI_REASONING_EFFORT", ""),
             optional=True,
             lang=lang,
         )
@@ -1729,10 +1751,12 @@ def _run_advanced_setup_prompts(values: dict[str, str], current: dict[str, str],
         )
     )
     prompts = [
-        ("XAI_API_URL", "xAI Responses API URL", True),
+        ("XAI_API_URL", "xAI channel API URL", True),
         ("XAI_API_KEY", "xAI API key", True),
-        ("XAI_MODEL", "xAI Responses model", True),
-        ("XAI_TOOLS", "xAI Responses tools (web_search,x_search)", True),
+        ("XAI_MODEL", "xAI channel model", True),
+        ("XAI_TOOLS", "xAI channel search tools (web_search,x_search)", True),
+        ("XAI_API_FORMAT", "xAI API format (responses/chat-completions/messages/google)", True),
+        ("XAI_REASONING_EFFORT", "xAI reasoning effort (blank means omit)", True),
         ("OPENAI_COMPATIBLE_API_URL", "OpenAI-compatible API URL", True),
         ("OPENAI_COMPATIBLE_API_KEY", "OpenAI-compatible API key", True),
         ("OPENAI_COMPATIBLE_MODEL", "OpenAI-compatible model", True),
@@ -1773,6 +1797,10 @@ async def _run_async(args: argparse.Namespace) -> int:
         }
         if args.stream is not None:
             search_kwargs["stream"] = args.stream
+        if args.api_format:
+            search_kwargs["api_format"] = args.api_format
+        if args.reasoning_effort is not None:
+            search_kwargs["reasoning_effort"] = args.reasoning_effort
         try:
             data = await asyncio.wait_for(
                 service.search(args.query, **search_kwargs),
@@ -1930,6 +1958,8 @@ def _run_setup(args: argparse.Namespace) -> int:
         "XAI_API_KEY": args.xai_api_key,
         "XAI_MODEL": args.xai_model,
         "XAI_TOOLS": args.xai_tools_explicit,
+        "XAI_API_FORMAT": args.xai_api_format,
+        "XAI_REASONING_EFFORT": args.xai_reasoning_effort,
         "OPENAI_COMPATIBLE_API_URL": args.openai_compatible_api_url,
         "OPENAI_COMPATIBLE_API_KEY": args.openai_compatible_api_key,
         "OPENAI_COMPATIBLE_MODEL": args.openai_compatible_model,
@@ -2040,7 +2070,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True, parser_class=SmartSearchArgumentParser)
 
     search_parser = sub.add_parser(
-        "search", aliases=COMMAND_ALIASES["search"], help="Run OpenAI-compatible web search."
+        "search", aliases=COMMAND_ALIASES["search"], help="Run configured multi-protocol main search."
     )
     search_parser.set_defaults(command="search")
     search_parser.add_argument("query")
@@ -2050,10 +2080,22 @@ def build_parser() -> argparse.ArgumentParser:
     search_parser.add_argument("--validation", choices=["fast", "balanced", "strict"], default="")
     search_parser.add_argument("--fallback", choices=["auto", "off"], default="")
     search_parser.add_argument("--providers", default="auto")
+    search_parser.add_argument(
+        "--api-format",
+        default="",
+        metavar="FORMAT",
+        help="Override the xAI channel format: responses, chat-completions, messages, or google.",
+    )
+    search_parser.add_argument(
+        "--reasoning-effort",
+        default=None,
+        metavar="EFFORT",
+        help="Override xAI reasoning effort; omit this flag to use config, or leave both blank to send no effort field.",
+    )
     stream_group = search_parser.add_mutually_exclusive_group()
     stream_group.add_argument("--stream", dest="stream", action="store_true", default=None, help="Use stream=true for OpenAI-compatible main search.")
     stream_group.add_argument("--no-stream", dest="stream", action="store_false", help="Force stream=false for OpenAI-compatible main search.")
-    search_parser.add_argument("--timeout", type=float, default=90, metavar="SECONDS", help="Hard timeout in seconds.")
+    search_parser.add_argument("--timeout", type=float, default=180, metavar="SECONDS", help="Hard timeout in seconds.")
     _add_format_args(search_parser)
 
     fetch_parser = sub.add_parser("fetch", aliases=COMMAND_ALIASES["fetch"], help="Fetch a URL as markdown.")
@@ -2267,6 +2309,8 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--xai-api-key", default="", help="Save XAI_API_KEY.")
     setup_parser.add_argument("--xai-model", default="", help="Save XAI_MODEL.")
     setup_parser.add_argument("--xai-tools-explicit", default="", help="Save XAI_TOOLS.")
+    setup_parser.add_argument("--xai-api-format", default="", help="Save XAI_API_FORMAT.")
+    setup_parser.add_argument("--xai-reasoning-effort", default="", help="Save XAI_REASONING_EFFORT.")
     setup_parser.add_argument("--openai-compatible-api-url", default="", help="Save OPENAI_COMPATIBLE_API_URL.")
     setup_parser.add_argument("--openai-compatible-api-key", default="", help="Save OPENAI_COMPATIBLE_API_KEY.")
     setup_parser.add_argument("--openai-compatible-model", default="", help="Save OPENAI_COMPATIBLE_MODEL.")

@@ -15,6 +15,8 @@ def _reset_config(monkeypatch, tmp_path):
         "XAI_API_KEY",
         "XAI_MODEL",
         "XAI_TOOLS",
+        "XAI_API_FORMAT",
+        "XAI_REASONING_EFFORT",
         "OPENAI_COMPATIBLE_API_URL",
         "OPENAI_COMPATIBLE_API_KEY",
         "OPENAI_COMPATIBLE_MODEL",
@@ -98,6 +100,42 @@ def test_openai_compatible_stream_config_defaults_and_boolean_styles(monkeypatch
 
     monkeypatch.setenv("OPENAI_COMPATIBLE_STREAM", "false")
     assert service.config.openai_compatible_stream is False
+
+
+def test_xai_api_format_defaults_aliases_and_optional_reasoning(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+
+    assert service.config.xai_api_format == "responses"
+    assert service.config.xai_reasoning_effort is None
+    monkeypatch.setenv("XAI_API_FORMAT", "   ")
+    assert service.config.xai_api_format == "responses"
+
+    aliases = {
+        "response": "responses",
+        "chatcompletions": "chat-completions",
+        "message": "messages",
+        "gemini": "google",
+    }
+    for raw, expected in aliases.items():
+        monkeypatch.setenv("XAI_API_FORMAT", raw)
+        assert service.config.xai_api_format == expected
+
+    monkeypatch.setenv("XAI_REASONING_EFFORT", " high ")
+    assert service.config.xai_reasoning_effort == "high"
+    monkeypatch.setenv("XAI_REASONING_EFFORT", " ")
+    assert service.config.xai_reasoning_effort is None
+
+
+def test_xai_api_format_rejects_unknown_value(monkeypatch, tmp_path):
+    _reset_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("XAI_API_FORMAT", "not-a-protocol")
+
+    with pytest.raises(ValueError, match="Invalid XAI_API_FORMAT"):
+        _ = service.config.xai_api_format
+
+    info = service.config.get_config_info()
+    assert info["XAI_API_FORMAT"] == "not-a-protocol"
+    assert any("Invalid XAI_API_FORMAT" in error for error in info["config_parameter_errors"])
 
 
 def test_anysearch_config_defaults_and_saved_values(monkeypatch, tmp_path):
@@ -355,6 +393,75 @@ async def test_search_uses_xai_responses_for_explicit_xai_config(monkeypatch):
     assert captured["provider"] == "XAIResponsesSearchProvider"
     assert captured["tools"] == ["web_search", "x_search"]
     assert result["sources"][0]["url"] == "https://example.com"
+
+
+@pytest.mark.asyncio
+async def test_search_overrides_xai_format_and_optional_reasoning(monkeypatch):
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-secret")
+    monkeypatch.setenv("XAI_API_FORMAT", "responses")
+    monkeypatch.setenv("XAI_REASONING_EFFORT", "low")
+    captured = {}
+
+    async def fake_search(self, query, platform="", ctx=None):
+        captured["api_format"] = self.api_format
+        captured["reasoning_effort"] = self.reasoning_effort
+        return "Answer."
+
+    monkeypatch.setattr(service.XAIResponsesSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "call_tavily_search", lambda *a, **k: None)
+    monkeypatch.setattr(service, "call_firecrawl_search", lambda *a, **k: None)
+
+    result = await service.search(
+        "what is example",
+        api_format="message",
+        reasoning_effort=" high ",
+    )
+
+    assert result["ok"] is True
+    assert result["primary_api_mode"] == "xai-messages"
+    assert captured == {"api_format": "messages", "reasoning_effort": "high"}
+    assert result["routing_decision"]["xai_api_format"] == "messages"
+    assert result["routing_decision"]["xai_reasoning_effort"] == "high"
+    assert result["routing_decision"]["xai_ignored_tools"] == ["x_search"]
+
+
+@pytest.mark.asyncio
+async def test_search_blank_reasoning_override_omits_configured_effort(monkeypatch):
+    monkeypatch.setenv("XAI_API_KEY", "xai-test-secret")
+    monkeypatch.setenv("XAI_REASONING_EFFORT", "high")
+    captured = {}
+
+    async def fake_search(self, query, platform="", ctx=None):
+        captured["reasoning_effort"] = self.reasoning_effort
+        captured["api_format"] = self.api_format
+        return "Answer."
+
+    monkeypatch.setattr(service.XAIResponsesSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "call_tavily_search", lambda *a, **k: None)
+    monkeypatch.setattr(service, "call_firecrawl_search", lambda *a, **k: None)
+
+    result = await service.search(
+        "what is example",
+        api_format="   ",
+        reasoning_effort="",
+    )
+
+    assert result["ok"] is True
+    assert captured["reasoning_effort"] is None
+    assert captured["api_format"] == "responses"
+    assert result["routing_decision"]["xai_reasoning_effort"] == ""
+
+
+@pytest.mark.asyncio
+async def test_search_rejects_xai_protocol_override_without_selected_xai_channel(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+
+    result = await service.search("what is example", api_format="google")
+
+    assert result["ok"] is False
+    assert result["error_type"] == "parameter_error"
+    assert "configured xAI channel" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -1222,11 +1329,14 @@ async def test_primary_connection_keeps_chat_ok_when_models_probe_errors(monkeyp
 @pytest.mark.asyncio
 async def test_doctor_uses_responses_endpoint_for_explicit_xai_config(monkeypatch):
     monkeypatch.setenv("XAI_API_KEY", "xai-test-secret")
+    monkeypatch.setenv("XAI_API_URL", "https://api.x.ai/v1/responses")
     calls = []
 
     class FakeAsyncClient:
-        def __init__(self, timeout):
+        def __init__(self, timeout, follow_redirects=False, verify=True):
             self.timeout = timeout
+            self.follow_redirects = follow_redirects
+            self.verify = verify
 
         async def __aenter__(self):
             return self
@@ -1252,6 +1362,124 @@ async def test_doctor_uses_responses_endpoint_for_explicit_xai_config(monkeypatc
     assert result["primary_connection_test"]["status"] == "ok"
     assert calls[0][0] == "https://api.x.ai/v1/responses"
     assert "tools" not in calls[0][1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("api_format", "api_url", "expected_url", "auth_header"),
+    [
+        (
+            "chat-completions",
+            "https://relay.example.com/v1",
+            "https://relay.example.com/v1/chat/completions",
+            "Authorization",
+        ),
+        (
+            "messages",
+            "https://api.anthropic.com/v1",
+            "https://api.anthropic.com/v1/messages",
+            "x-api-key",
+        ),
+        (
+            "google",
+            "https://generativelanguage.googleapis.com/v1beta",
+            "https://generativelanguage.googleapis.com/v1beta/models/test-model:generateContent",
+            "x-goog-api-key",
+        ),
+    ],
+)
+async def test_doctor_uses_selected_xai_protocol(
+    monkeypatch,
+    api_format,
+    api_url,
+    expected_url,
+    auth_header,
+):
+    calls = []
+
+    class FakeAsyncClient:
+        def __init__(self, timeout, follow_redirects=False, verify=True):
+            self.timeout = timeout
+            self.follow_redirects = follow_redirects
+            self.verify = verify
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers, json):
+            calls.append((url, headers, json))
+            return httpx.Response(
+                200,
+                json={},
+                request=httpx.Request("POST", url),
+            )
+
+    monkeypatch.setattr(service.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = await service._test_main_provider_connection(
+        {
+            "provider": "xai-responses",
+            "mode": f"xai-{api_format}",
+            "api_url": api_url,
+            "api_key": "test-key",
+            "model": "test-model",
+            "api_format": api_format,
+        }
+    )
+
+    assert result["status"] == "ok"
+    assert result["api_format"] == api_format
+    assert calls[0][0] == expected_url
+    assert auth_header in calls[0][1]
+    assert "reasoning" not in calls[0][2]
+    assert "reasoning_effort" not in calls[0][2]
+    assert "thinking" not in calls[0][2]
+    assert "generationConfig" not in calls[0][2]
+
+
+@pytest.mark.asyncio
+async def test_doctor_probes_configured_xai_reasoning_effort(monkeypatch):
+    captured = {}
+
+    class FakeAsyncClient:
+        def __init__(self, timeout, follow_redirects=False, verify=True):
+            captured["follow_redirects"] = follow_redirects
+            captured["verify"] = verify
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers, json):
+            captured["payload"] = json
+            return httpx.Response(200, json={}, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(service.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = await service._test_main_provider_connection(
+        {
+            "provider": "xai-responses",
+            "mode": "xai-messages",
+            "api_url": "https://api.anthropic.com/v1",
+            "api_key": "test-key",
+            "model": "claude-test",
+            "api_format": "messages",
+            "reasoning_effort": "high",
+        }
+    )
+
+    assert result["status"] == "ok"
+    assert result["reasoning_effort_tested"] == "high"
+    assert result["tools_tested"] is False
+    assert captured["payload"]["output_config"] == {"effort": "high"}
+    assert "thinking" not in captured["payload"]
+    assert captured["follow_redirects"] is True
+    assert captured["verify"] is True
 
 
 @pytest.mark.asyncio
@@ -1309,13 +1537,13 @@ async def test_doctor_tests_main_providers_independently(monkeypatch):
     monkeypatch.setenv("EXA_API_KEY", "exa-test-secret")
     monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
 
-    async def fake_xai(api_url, api_key, model):
+    async def fake_xai(provider_config):
         raise httpx.TimeoutException("xai timeout")
 
     async def fake_openai(api_url, api_key, model):
         return {"status": "ok", "message": "relay ok"}
 
-    monkeypatch.setattr(service, "_test_primary_responses", fake_xai)
+    monkeypatch.setattr(service, "_test_xai_protocol_connection", fake_xai)
     monkeypatch.setattr(service, "_test_primary_connection", fake_openai)
     async def fake_exa_connection():
         return {"status": "ok", "message": "exa ok"}

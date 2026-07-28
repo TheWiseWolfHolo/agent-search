@@ -160,6 +160,30 @@ def test_search_help_exposes_timeout(capsys):
     assert "--timeout SECONDS" in out
     assert "--stream" in out
     assert "--no-stream" in out
+    assert "--api-format FORMAT" in out
+    assert "--reasoning-effort EFFORT" in out
+
+
+def test_search_protocol_defaults_and_overrides():
+    parser = cli.build_parser()
+
+    defaults = parser.parse_args(["search", "query"])
+    assert defaults.api_format == ""
+    assert defaults.reasoning_effort is None
+    assert defaults.timeout == 180
+
+    overridden = parser.parse_args(
+        [
+            "search",
+            "query",
+            "--api-format",
+            "messages",
+            "--reasoning-effort",
+            "high",
+        ]
+    )
+    assert overridden.api_format == "messages"
+    assert overridden.reasoning_effort == "high"
 
 
 def test_diagnose_openai_compatible_defaults_to_markdown(monkeypatch, capsys):
@@ -628,6 +652,33 @@ def test_search_timeout_respects_requested_format_and_exit_4(monkeypatch, capsys
     assert data["model"] == "relay-timeout-model"
     assert data["stream"] is True
     assert data["recommendation"]
+
+
+def test_search_passes_protocol_and_reasoning_overrides(monkeypatch, capsys):
+    captured = {}
+
+    async def fake_search(query, **kwargs):
+        captured["query"] = query
+        captured.update(kwargs)
+        return {"ok": True, "content": "Answer", "sources": [], "sources_count": 0}
+
+    monkeypatch.setattr(cli.service, "search", fake_search)
+
+    code = cli.main(
+        [
+            "search",
+            "query",
+            "--api-format",
+            "google",
+            "--reasoning-effort",
+            "medium",
+        ]
+    )
+
+    assert code == cli.EXIT_OK
+    assert captured["api_format"] == "google"
+    assert captured["reasoning_effort"] == "medium"
+    assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
 def test_markdown_search_includes_sources(monkeypatch, capsys):
@@ -1220,6 +1271,10 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
         "xai-model",
         "--xai-tools-explicit",
         "web_search",
+        "--xai-api-format",
+        "messages",
+        "--xai-reasoning-effort",
+        "high",
         "--openai-compatible-api-url",
         "https://relay.example.com/v1",
         "--openai-compatible-api-key",
@@ -1257,6 +1312,8 @@ def test_setup_non_interactive_saves_values(monkeypatch, capsys):
     assert saved["XAI_API_KEY"] == "xai-test-secret"
     assert saved["XAI_MODEL"] == "xai-model"
     assert saved["XAI_TOOLS"] == "web_search"
+    assert saved["XAI_API_FORMAT"] == "messages"
+    assert saved["XAI_REASONING_EFFORT"] == "high"
     assert saved["OPENAI_COMPATIBLE_API_URL"] == "https://relay.example.com/v1"
     assert saved["OPENAI_COMPATIBLE_API_KEY"] == "relay-test-secret"
     assert saved["OPENAI_COMPATIBLE_MODEL"] == "relay-model"
@@ -1538,7 +1595,7 @@ def test_tavily_hikari_prompt_shows_beginner_url_example(monkeypatch, capsys):
 
 def test_setup_guided_zh_groups_minimum_capabilities(monkeypatch, capsys):
     saved = {}
-    answers = iter(["xai", "", "context7", "tavily", "", "n", "n"])
+    answers = iter(["xai", "", "", "", "context7", "tavily", "", "n", "n"])
     secrets = iter(["xai-test-secret", "context7-test-secret", "tavily-test-secret"])
 
     def fake_config_set(key, value):
@@ -1726,7 +1783,7 @@ def test_setup_guided_main_search_can_save_openai_compatible_peer(monkeypatch, c
 
 def test_setup_guided_main_search_can_save_both_peer_providers(monkeypatch, capsys):
     saved = {}
-    answers = iter(["both", "", "https://relay.example.com/v1", "", "", "skip", "skip", "n", "n"])
+    answers = iter(["both", "", "", "", "https://relay.example.com/v1", "", "", "skip", "skip", "n", "n"])
     secrets = iter(["xai-test-secret", "relay-test-secret"])
 
     def fake_config_set(key, value):
@@ -1988,7 +2045,7 @@ def test_setup_advanced_mode_keeps_low_level_prompts(monkeypatch, capsys):
     assert code == cli.EXIT_OK
     captured = capsys.readouterr()
     assert "Legacy primary API URL optional" not in captured.err
-    assert "xAI Responses API URL optional" in captured.err
+    assert "xAI channel API URL optional" in captured.err
     assert "OpenAI-compatible API URL optional" in captured.err
     assert "Advanced mode" in captured.err
 
