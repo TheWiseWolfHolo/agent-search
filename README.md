@@ -1,5 +1,7 @@
 # WolfHolo Agent Search
 
+[![CI](https://github.com/TheWiseWolfHolo/agent-search/actions/workflows/ci.yml/badge.svg)](https://github.com/TheWiseWolfHolo/agent-search/actions/workflows/ci.yml)
+
 [简体中文](README.zh-CN.md) | English
 
 WolfHolo Agent Search is a CLI-first research tool for AI agents and terminal users. It gives assistants one reproducible command layer for live search, source discovery, page fetching, site mapping, provider diagnostics, and offline deep-research planning.
