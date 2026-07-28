@@ -16,6 +16,11 @@ dependencies = [
     "tenacity>=8.0.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/TheWiseWolfHolo/agent-search"
+Issues = "https://github.com/TheWiseWolfHolo/agent-search/issues"
+Upstream = "https://github.com/konbakuyomu/smartsearch"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",

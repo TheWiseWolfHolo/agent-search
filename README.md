@@ -173,6 +173,14 @@ Useful Windows wrapper check for non-ASCII JSON output:
 agent-search deep "深度搜索一下最近的比特币行情" --format json | ConvertFrom-Json
 ```
 
+## Project Lineage
+
+Agent Search is an independent distribution derived from
+[konbakuyomu/smartsearch](https://github.com/konbakuyomu/smartsearch). It keeps
+its own command name, package namespace, configuration prefix, release cycle,
+and product decisions while continuing to learn from the upstream project.
+The original MIT copyright notice is preserved in [LICENSE](LICENSE).
+
 ## Release Lanes
 
 Stable releases use tags and npm `latest`:
