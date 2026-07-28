@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -74,7 +75,6 @@ ZH_CURRENT_KEYWORDS = {
     "足球",
     "篮球",
 }
-FETCH_INTENT_KEYWORDS = {"http://", "https://"}
 DEEP_ALLOWED_TOOLS = {
     "search",
     "exa-search",
@@ -223,6 +223,7 @@ def _attempt(
     result_count: int = 0,
     error_type: str = "",
     error: str = "",
+    fallback: bool = False,
 ) -> dict[str, Any]:
     return {
         "capability": capability,
@@ -232,6 +233,7 @@ def _attempt(
         "error": error,
         "elapsed_ms": _elapsed_ms(start),
         "result_count": result_count,
+        "fallback": fallback,
     }
 
 
@@ -268,12 +270,7 @@ def _provider_names_from_attempts(attempts: list[dict]) -> list[str]:
 
 
 def _fallback_used(attempts: list[dict]) -> bool:
-    by_capability: dict[str, int] = {}
-    for attempt in attempts:
-        capability = attempt.get("capability", "")
-        if attempt.get("status") in {"ok", "empty", "error"}:
-            by_capability[capability] = by_capability.get(capability, 0) + 1
-    return any(count > 1 for count in by_capability.values())
+    return any(bool(attempt.get("fallback")) for attempt in attempts)
 
 
 def _is_docs_intent(query: str) -> bool:
@@ -286,21 +283,21 @@ def _is_zh_current_intent(query: str) -> bool:
     return any(keyword in q for keyword in ZH_CURRENT_KEYWORDS)
 
 
-def _is_fetch_intent(query: str) -> bool:
-    q = query.lower()
-    return any(keyword in q for keyword in FETCH_INTENT_KEYWORDS)
-
-
 def _contains_any(query: str, keywords: set[str]) -> bool:
     q = query.lower()
     return any(keyword.lower() in q for keyword in keywords)
 
 
 def _extract_urls(query: str) -> list[str]:
-    urls = []
-    for match in re.findall(r"https?://[^\s<>\]\)\"']+", query):
-        cleaned = match.rstrip(".,;，。；)")
-        if cleaned:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for match in re.findall(r"https?://[^\s<>\"']+", query):
+        cleaned = match.rstrip(".,;，。；")
+        for opening, closing in (("(", ")"), ("[", "]")):
+            while cleaned.endswith(closing) and cleaned.count(opening) < cleaned.count(closing):
+                cleaned = cleaned[:-1]
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
             urls.append(cleaned)
     return urls
 
@@ -314,7 +311,11 @@ def _slugify_query(query: str) -> str:
 
 def _default_evidence_dir(query: str) -> str:
     timestamp = time.strftime("%Y%m%d-%H%M")
-    return str(Path("C:/tmp/agent-search-evidence") / f"{timestamp}-{_slugify_query(query)}")
+    return str(
+        Path(tempfile.gettempdir())
+        / "agent-search-evidence"
+        / f"{timestamp}-{_slugify_query(query)}"
+    )
 
 
 def _quote_arg(value: str) -> str:
@@ -898,17 +899,27 @@ def extra_results_to_sources(
     return sources
 
 
-async def _run_web_fetch_fallback(url: str, fallback: str = "auto") -> tuple[dict[str, Any] | None, list[dict]]:
+async def _run_web_fetch_fallback(
+    url: str,
+    fallback: str = "auto",
+    providers: str = "auto",
+) -> tuple[dict[str, Any] | None, list[dict]]:
+    provider_filter = _parse_provider_filter(providers)
     attempts: list[dict] = []
-    providers = []
-    if config.tavily_api_key:
-        providers.append("tavily")
-    if config.firecrawl_api_key:
-        providers.append("firecrawl")
+    configured: list[str] = []
+    if config.tavily_api_key and (
+        provider_filter is None or "tavily" in provider_filter
+    ):
+        configured.append("tavily")
+    if config.firecrawl_api_key and (
+        provider_filter is None or "firecrawl" in provider_filter
+    ):
+        configured.append("firecrawl")
     if fallback == "off":
-        providers = providers[:1]
+        configured = configured[:1]
 
-    for provider in providers:
+    for provider_index, provider in enumerate(configured):
+        is_fallback = provider_index > 0
         start = time.time()
         try:
             if provider == "tavily":
@@ -916,16 +927,26 @@ async def _run_web_fetch_fallback(url: str, fallback: str = "auto") -> tuple[dic
             else:
                 content = await call_firecrawl_scrape(url)
             if content and content.strip():
-                attempts.append(_attempt("web_fetch", provider, "ok", start, result_count=1))
+                attempts.append(_attempt("web_fetch", provider, "ok", start, result_count=1, fallback=is_fallback))
                 return {
                     "ok": True,
                     "url": url,
                     "provider": provider,
                     "content": content,
                 }, attempts
-            attempts.append(_attempt("web_fetch", provider, "empty", start))
+            attempts.append(_attempt("web_fetch", provider, "empty", start, fallback=is_fallback))
         except Exception as e:
-            attempts.append(_attempt("web_fetch", provider, "error", start, error_type="runtime_error", error=str(e)))
+            attempts.append(
+                _attempt(
+                    "web_fetch",
+                    provider,
+                    "error",
+                    start,
+                    error_type="runtime_error",
+                    error=str(e),
+                    fallback=is_fallback,
+                )
+            )
     return None, attempts
 
 
@@ -934,6 +955,7 @@ async def _run_web_search_fallback(
     count: int = 5,
     providers: str = "auto",
     fallback: str = "auto",
+    exclude_providers: set[str] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     provider_filter = _parse_provider_filter(providers)
     attempts: list[dict] = []
@@ -946,26 +968,39 @@ async def _run_web_search_fallback(
         configured = [p for p in configured if p in provider_filter]
     if fallback == "off":
         configured = configured[:1]
+    if exclude_providers:
+        configured = [p for p in configured if p not in exclude_providers]
 
-    for provider in configured:
+    for provider_index, provider in enumerate(configured):
+        is_fallback = provider_index > 0
         start = time.time()
         try:
             if provider == "tavily":
                 results = await call_tavily_search(query, count)
                 sources = _normalize_source_results(results, "tavily")
                 if sources:
-                    attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources)))
+                    attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources), fallback=is_fallback))
                     return sources, attempts
-                attempts.append(_attempt("web_search", provider, "empty", start))
+                attempts.append(_attempt("web_search", provider, "empty", start, fallback=is_fallback))
             elif provider == "firecrawl":
                 results = await call_firecrawl_search(query, count)
                 sources = _normalize_source_results(results, "firecrawl")
                 if sources:
-                    attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources)))
+                    attempts.append(_attempt("web_search", provider, "ok", start, result_count=len(sources), fallback=is_fallback))
                     return sources, attempts
-                attempts.append(_attempt("web_search", provider, "empty", start))
+                attempts.append(_attempt("web_search", provider, "empty", start, fallback=is_fallback))
         except Exception as e:
-            attempts.append(_attempt("web_search", provider, "error", start, error_type="runtime_error", error=str(e)))
+            attempts.append(
+                _attempt(
+                    "web_search",
+                    provider,
+                    "error",
+                    start,
+                    error_type="runtime_error",
+                    error=str(e),
+                    fallback=is_fallback,
+                )
+            )
     return [], attempts
 
 
@@ -986,7 +1021,8 @@ async def _run_docs_search_fallback(
     if fallback == "off":
         configured = configured[:1]
 
-    for provider in configured:
+    for provider_index, provider in enumerate(configured):
+        is_fallback = provider_index > 0
         start = time.time()
         try:
             if provider == "exa":
@@ -994,10 +1030,20 @@ async def _run_docs_search_fallback(
                 if data.get("ok"):
                     sources = _normalize_source_results(data.get("results"), "exa")
                     if sources:
-                        attempts.append(_attempt("docs_search", provider, "ok", start, result_count=len(sources)))
+                        attempts.append(_attempt("docs_search", provider, "ok", start, result_count=len(sources), fallback=is_fallback))
                         return sources, attempts
                 status = "error" if data.get("error_type") in {"auth_error", "parameter_error", "rate_limited", "timeout", "network_error", "runtime_error"} else "empty"
-                attempts.append(_attempt("docs_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+                attempts.append(
+                    _attempt(
+                        "docs_search",
+                        provider,
+                        status,
+                        start,
+                        error_type=data.get("error_type", ""),
+                        error=data.get("error", ""),
+                        fallback=is_fallback,
+                    )
+                )
             elif provider == "context7":
                 data = await context7_library(query, query)
                 if data.get("ok"):
@@ -1012,12 +1058,32 @@ async def _run_docs_search_fallback(
                         if item.get("id")
                     ]
                     if sources:
-                        attempts.append(_attempt("docs_search", provider, "ok", start, result_count=len(sources)))
+                        attempts.append(_attempt("docs_search", provider, "ok", start, result_count=len(sources), fallback=is_fallback))
                         return sources, attempts
                 status = "error" if data.get("error_type") in {"auth_error", "timeout", "network_error", "runtime_error"} else "empty"
-                attempts.append(_attempt("docs_search", provider, status, start, error_type=data.get("error_type", ""), error=data.get("error", "")))
+                attempts.append(
+                    _attempt(
+                        "docs_search",
+                        provider,
+                        status,
+                        start,
+                        error_type=data.get("error_type", ""),
+                        error=data.get("error", ""),
+                        fallback=is_fallback,
+                    )
+                )
         except Exception as e:
-            attempts.append(_attempt("docs_search", provider, "error", start, error_type="runtime_error", error=str(e)))
+            attempts.append(
+                _attempt(
+                    "docs_search",
+                    provider,
+                    "error",
+                    start,
+                    error_type="runtime_error",
+                    error=str(e),
+                    fallback=is_fallback,
+                )
+            )
     return [], attempts
 
 
@@ -1054,23 +1120,20 @@ async def call_tavily_search(query: str, max_results: int = 6) -> list[dict] | N
         "include_raw_content": False,
         "include_answer": False,
     }
-    try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            response = await client.post(endpoint, headers=headers, json=body)
-            response.raise_for_status()
-            data = response.json()
-            results = data.get("results", [])
-            return [
-                {
-                    "title": r.get("title", ""),
-                    "url": r.get("url", ""),
-                    "content": r.get("content", ""),
-                    "score": r.get("score", 0),
-                }
-                for r in results
-            ] if results else None
-    except Exception:
-        return None
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        response = await client.post(endpoint, headers=headers, json=body)
+        response.raise_for_status()
+        data = response.json()
+        results = data.get("results", [])
+        return [
+            {
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "content": r.get("content", ""),
+                "score": r.get("score", 0),
+            }
+            for r in results
+        ] if results else None
 
 
 async def call_firecrawl_search(query: str, limit: int = 14) -> list[dict] | None:
@@ -1080,22 +1143,19 @@ async def call_firecrawl_search(query: str, limit: int = 14) -> list[dict] | Non
     endpoint = f"{config.firecrawl_api_url.rstrip('/')}/search"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     body = {"query": query, "limit": limit}
-    try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
-            response = await client.post(endpoint, headers=headers, json=body)
-            response.raise_for_status()
-            data = response.json()
-            results = data.get("data", {}).get("web", [])
-            return [
-                {
-                    "title": r.get("title", ""),
-                    "url": r.get("url", ""),
-                    "description": r.get("description", ""),
-                }
-                for r in results
-            ] if results else None
-    except Exception:
-        return None
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        response = await client.post(endpoint, headers=headers, json=body)
+        response.raise_for_status()
+        data = response.json()
+        results = data.get("data", {}).get("web", [])
+        return [
+            {
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "description": r.get("description", ""),
+            }
+            for r in results
+        ] if results else None
 
 
 async def call_firecrawl_scrape(url: str, ctx=None) -> str | None:
@@ -1235,8 +1295,13 @@ async def search(
             if provider_config["provider"] == "openai-compatible":
                 provider_config["stream"] = stream
 
-    has_tavily = bool(config.tavily_api_key)
-    has_firecrawl = bool(config.firecrawl_api_key)
+    provider_filter = _parse_provider_filter(providers)
+    has_tavily = bool(config.tavily_api_key) and (
+        provider_filter is None or "tavily" in provider_filter
+    )
+    has_firecrawl = bool(config.firecrawl_api_key) and (
+        provider_filter is None or "firecrawl" in provider_filter
+    )
     tavily_count = 0
     firecrawl_count = 0
     if extra_sources > 0:
@@ -1251,20 +1316,27 @@ async def search(
     docs_intent = _is_docs_intent(query)
     zh_current_intent = _is_zh_current_intent(query)
     web_current_intent = zh_current_intent
-    fetch_intent = _is_fetch_intent(query)
+    fetch_urls = _extract_urls(query)
+    fetch_intent = bool(fetch_urls)
     supplemental_paths: list[str] = []
-    if docs_intent:
-        supplemental_paths.append("docs_search")
-    if web_current_intent or validation_level == "strict":
+    if extra_sources > 0 and (tavily_count or firecrawl_count):
         supplemental_paths.append("web_search")
-    if fetch_intent:
-        supplemental_paths.append("web_fetch")
+    if validation_level in {"balanced", "strict"}:
+        if docs_intent:
+            supplemental_paths.append("docs_search")
+        if (
+            web_current_intent or validation_level == "strict"
+        ) and "web_search" not in supplemental_paths:
+            supplemental_paths.append("web_search")
+        if fetch_intent:
+            supplemental_paths.append("web_fetch")
     selected_main_provider_configs = main_provider_configs if fallback_mode != "off" else main_provider_configs[:1]
     routing_decision = {
         "docs_intent": docs_intent,
         "zh_current_intent": zh_current_intent,
         "web_current_intent": web_current_intent,
         "fetch_intent": fetch_intent,
+        "fetch_urls": fetch_urls,
         "supplemental_paths": supplemental_paths,
         "validation_level": validation_level,
         "fallback_mode": fallback_mode,
@@ -1303,14 +1375,17 @@ async def search(
     primary_result = None
     successful_main_config: dict[str, Any] | None = None
     last_primary_error: dict[str, Any] | None = None
-    for provider_config, search_provider in zip(selected_main_provider_configs, main_providers):
+    for provider_index, (provider_config, search_provider) in enumerate(
+        zip(selected_main_provider_configs, main_providers)
+    ):
+        is_fallback = provider_index > 0
         primary_start = time.time()
         try:
             candidate_result = await search_provider.search(query, platform)
             if candidate_result:
                 primary_result = candidate_result
                 successful_main_config = provider_config
-                provider_attempts.append(_attempt("main_search", search_provider.get_provider_name(), "ok", primary_start, result_count=1))
+                provider_attempts.append(_attempt("main_search", search_provider.get_provider_name(), "ok", primary_start, result_count=1, fallback=is_fallback))
                 break
             last_primary_error = _primary_search_error_result(
                 start,
@@ -1320,7 +1395,7 @@ async def search(
                 "network_error",
                 f"{search_provider.get_provider_name()} 返回空结果",
             )
-            provider_attempts.append(_attempt("main_search", search_provider.get_provider_name(), "empty", primary_start))
+            provider_attempts.append(_attempt("main_search", search_provider.get_provider_name(), "empty", primary_start, fallback=is_fallback))
         except Exception as e:
             error_result = _primary_search_exception_result(start, session_id, query, provider_config["mode"], search_provider.get_provider_name(), e)
             last_primary_error = error_result
@@ -1332,6 +1407,7 @@ async def search(
                     primary_start,
                     error_type=error_result["error_type"],
                     error=error_result["error"],
+                    fallback=is_fallback,
                 )
             )
     if primary_result is None:
@@ -1355,22 +1431,55 @@ async def search(
     if firecrawl_count:
         coros.append(call_firecrawl_search(query, firecrawl_count))
 
+    extra_search_start = time.time()
     gathered = await asyncio.gather(*coros, return_exceptions=True)
     primary_result = primary_result or ""
     tavily_results: list[dict] | None = None
     firecrawl_results: list[dict] | None = None
     idx = 0
     if tavily_count:
-        tavily_results = None if isinstance(gathered[idx], BaseException) else gathered[idx]
+        tavily_raw = gathered[idx]
+        if isinstance(tavily_raw, BaseException):
+            tavily_results = None
+            provider_attempts.append(
+                _attempt("web_search", "tavily", "error", extra_search_start, error_type="runtime_error", error=str(tavily_raw))
+            )
+        else:
+            tavily_results = tavily_raw
+            tavily_sources = _normalize_source_results(tavily_results, "tavily")
+            provider_attempts.append(
+                _attempt("web_search", "tavily", "ok" if tavily_sources else "empty", extra_search_start, result_count=len(tavily_sources))
+            )
         idx += 1
     if firecrawl_count:
-        firecrawl_results = None if isinstance(gathered[idx], BaseException) else gathered[idx]
+        firecrawl_raw = gathered[idx]
+        if isinstance(firecrawl_raw, BaseException):
+            firecrawl_results = None
+            provider_attempts.append(
+                _attempt("web_search", "firecrawl", "error", extra_search_start, error_type="runtime_error", error=str(firecrawl_raw))
+            )
+        else:
+            firecrawl_results = firecrawl_raw
+            firecrawl_sources = _normalize_source_results(firecrawl_results, "firecrawl")
+            provider_attempts.append(
+                _attempt("web_search", "firecrawl", "ok" if firecrawl_sources else "empty", extra_search_start, result_count=len(firecrawl_sources))
+            )
 
     answer, primary_sources = split_answer_and_sources(primary_result)
     extra_source_items = extra_results_to_sources(tavily_results, firecrawl_results)
-    for item_provider, results in (("tavily", tavily_results), ("firecrawl", firecrawl_results)):
-        if results:
-            provider_attempts.append(_attempt("web_search", item_provider, "ok", start, result_count=len(results)))
+    prequeried_web_providers: set[str] = set()
+    if tavily_count:
+        prequeried_web_providers.add("tavily")
+    if firecrawl_count:
+        prequeried_web_providers.add("firecrawl")
+    validation_web_reinforcement = validation_level in {"balanced", "strict"} and (
+        web_current_intent or validation_level == "strict"
+    )
+    explicit_extra_fallback = (
+        extra_sources > 0
+        and bool(prequeried_web_providers)
+        and fallback_mode != "off"
+    )
 
     supplemental_sources: list[dict] = []
     if validation_level in {"balanced", "strict"}:
@@ -1378,15 +1487,35 @@ async def search(
             docs_sources, docs_attempts = await _run_docs_search_fallback(query, providers=providers, fallback=fallback_mode)
             provider_attempts.extend(docs_attempts)
             supplemental_sources.extend(docs_sources)
-        if web_current_intent or validation_level == "strict":
-            web_sources, web_attempts = await _run_web_search_fallback(query, count=max(1, extra_sources or 3), providers=providers, fallback=fallback_mode)
-            provider_attempts.extend(web_attempts)
-            supplemental_sources.extend(web_sources)
         if fetch_intent:
-            fetch_result, fetch_attempts = await _run_web_fetch_fallback(query.strip(), fallback=fallback_mode)
+            fetch_result, fetch_attempts = await _run_web_fetch_fallback(
+                fetch_urls[0],
+                fallback=fallback_mode,
+                providers=providers,
+            )
             provider_attempts.extend(fetch_attempts)
             if fetch_result:
                 supplemental_sources.append({"url": fetch_result["url"], "provider": fetch_result["provider"], "description": fetch_result["content"][:300]})
+
+    if (
+        validation_web_reinforcement or explicit_extra_fallback
+    ) and not extra_source_items:
+        web_search_kwargs: dict[str, Any] = {
+            "count": max(1, extra_sources or 3),
+            "providers": providers,
+            "fallback": fallback_mode,
+        }
+        if prequeried_web_providers:
+            web_search_kwargs["exclude_providers"] = prequeried_web_providers
+        web_sources, web_attempts = await _run_web_search_fallback(
+            query,
+            **web_search_kwargs,
+        )
+        if prequeried_web_providers:
+            for attempt in web_attempts:
+                attempt["fallback"] = True
+        provider_attempts.extend(web_attempts)
+        supplemental_sources.extend(web_sources)
 
     extra_source_items = merge_sources(extra_source_items, supplemental_sources)
     sources = merge_sources(primary_sources, extra_source_items)
@@ -1497,36 +1626,17 @@ def _primary_search_error_result(
 
 async def fetch(url: str) -> dict[str, Any]:
     start = time.time()
-    attempts: list[dict] = []
-    tavily_start = time.time()
-    tavily_result = await call_tavily_extract(url)
-    if tavily_result:
-        attempts.append(_attempt("web_fetch", "tavily", "ok", tavily_start, result_count=1))
+    fetch_result, attempts = await _run_web_fetch_fallback(url)
+    if fetch_result:
         return {
             "ok": True,
             "url": url,
-            "provider": "tavily",
-            "content": tavily_result,
+            "provider": fetch_result["provider"],
+            "content": fetch_result["content"],
             "provider_attempts": attempts,
-            "fallback_used": False,
+            "fallback_used": _fallback_used(attempts),
             "elapsed_ms": _elapsed_ms(start),
         }
-    attempts.append(_attempt("web_fetch", "tavily", "empty", tavily_start))
-
-    firecrawl_start = time.time()
-    firecrawl_result = await call_firecrawl_scrape(url)
-    if firecrawl_result:
-        attempts.append(_attempt("web_fetch", "firecrawl", "ok", firecrawl_start, result_count=1))
-        return {
-            "ok": True,
-            "url": url,
-            "provider": "firecrawl",
-            "content": firecrawl_result,
-            "provider_attempts": attempts,
-            "fallback_used": True,
-            "elapsed_ms": _elapsed_ms(start),
-        }
-    attempts.append(_attempt("web_fetch", "firecrawl", "empty", firecrawl_start))
 
     if not config.tavily_api_key and not config.firecrawl_api_key:
         error = "TAVILY_API_KEY 和 FIRECRAWL_API_KEY 均未配置"
@@ -2361,25 +2471,25 @@ async def _smoke_mock(start: float) -> dict[str, Any]:
 
     main_fallback_attempts = [
         _attempt("main_search", "xAI Responses", "error", time.time(), error_type="network_error", error="mock failure"),
-        _attempt("main_search", "OpenAI-compatible", "ok", time.time(), result_count=1),
+        _attempt("main_search", "OpenAI-compatible", "ok", time.time(), result_count=1, fallback=True),
     ]
     cases.append(_case("main_search fallback xai_to_openai_compatible", _fallback_used(main_fallback_attempts), {"provider_attempts": main_fallback_attempts}))
 
     web_attempts = [
         _attempt("web_search", "tavily", "empty", time.time()),
-        _attempt("web_search", "firecrawl", "ok", time.time(), result_count=1),
+        _attempt("web_search", "firecrawl", "ok", time.time(), result_count=1, fallback=True),
     ]
     cases.append(_case("web_search fallback tavily_to_firecrawl", _fallback_used(web_attempts), {"provider_attempts": web_attempts}))
 
     attempts = [
         _attempt("web_fetch", "tavily", "empty", time.time()),
-        _attempt("web_fetch", "firecrawl", "ok", time.time(), result_count=1),
+        _attempt("web_fetch", "firecrawl", "ok", time.time(), result_count=1, fallback=True),
     ]
     cases.append(_case("web_fetch fallback tavily_to_firecrawl", _fallback_used(attempts), {"provider_attempts": attempts}))
 
     docs_attempts = [
         _attempt("docs_search", "context7", "empty", time.time()),
-        _attempt("docs_search", "exa", "ok", time.time(), result_count=1),
+        _attempt("docs_search", "exa", "ok", time.time(), result_count=1, fallback=True),
     ]
     cases.append(_case("docs_search fallback context7_to_exa", _fallback_used(docs_attempts), {"provider_attempts": docs_attempts}))
 

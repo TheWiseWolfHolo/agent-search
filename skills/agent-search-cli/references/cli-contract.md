@@ -81,7 +81,7 @@ Nested aliases:
 
 ## Output Format Expectations
 
-Successful search output includes `ok`, `query`, `primary_api_mode`, `content`, `sources`, `sources_count`, `primary_sources`, `primary_sources_count`, `extra_sources`, `extra_sources_count`, `source_warning`, `routing_decision`, `providers_used`, `provider_attempts`, `fallback_used`, `validation_level`, and `elapsed_ms`. Each source should include at least `url` when available.
+Successful search output includes `ok`, `query`, `primary_api_mode`, `content`, `sources`, `sources_count`, `primary_sources`, `primary_sources_count`, `extra_sources`, `extra_sources_count`, `source_warning`, `routing_decision`, `providers_used`, `provider_attempts`, `fallback_used`, `validation_level`, and `elapsed_ms`. Each source should include at least `url` when available. Each `provider_attempts[]` item includes a `fallback` boolean; it is true only for an actual sequential same-capability fallback, never merely because enrichment providers ran in parallel. Top-level `fallback_used` is true when any attempt has `fallback=true`.
 
 `--format json` is the stable machine-readable contract for agents and scripts. JSON output remains parseable and uses readable non-ASCII text when the terminal encoding supports it.
 
@@ -185,7 +185,7 @@ Before execution, the skill should call `agent-search deep "question" --format j
 - `final_answer_policy`: how to cite fetched evidence and list unverified candidates.
 - `usage_boundary`: user-facing distinction between fast live `search`, offline `deep` planning, and later step execution.
 
-Each `steps[]` item must include `id`, `subquestion_id`, `tool`, `purpose`, `command`, and `output_path`. Allowed `tool` values are `search`, `exa-search`, `exa-similar`, `context7-library`, `context7-docs`, `fetch`, and `map`; these map to existing CLI commands only. `doctor` is a `preflight` action, not a `steps[]` item. Use `C:\tmp\agent-search-evidence\<timestamp>-<slug>\` or an equivalent absolute evidence directory for `output_path` values.
+Each `steps[]` item must include `id`, `subquestion_id`, `tool`, `purpose`, `command`, and `output_path`. Allowed `tool` values are `search`, `exa-search`, `exa-similar`, `context7-library`, `context7-docs`, `fetch`, and `map`; these map to existing CLI commands only. `doctor` is a `preflight` action, not a `steps[]` item. Unless an explicit `--evidence-dir` is supplied, use the absolute `agent-search-evidence/<timestamp>-<slug>` directory under the operating system's temporary directory.
 
 Capability boundaries:
 
@@ -310,9 +310,10 @@ Agent timeout handling contract:
 - `web_search`: Tavily first, then Firecrawl source search when configured.
 - `docs_search`: Context7 first for library/API/docs intent, then Exa for official-domain, paper, product-page, trusted-site, or low-noise supplemental discovery.
 - Fetch capability: Tavily first, then Firecrawl.
-- `search` calls Tavily and/or Firecrawl only when `--extra-sources` is greater than 0.
+- `search --extra-sources N` runs a parallel Tavily/Firecrawl enrichment batch only when `N` is greater than 0. With `--fallback auto`, an unqueried peer may run sequentially when that batch produced no usable URL source. Balanced current-intent and strict validation may additionally run same-capability web reinforcement even when `N` is zero.
 - If both Tavily and Firecrawl are configured, `search --extra-sources N` gives about 60% of extra source slots to Tavily and the remainder to Firecrawl.
-- `extra_sources` are retrieved in parallel and are not automatically used by the primary model to verify its answer.
+- `extra_sources` are retrieved in parallel and are not automatically used by the primary model to verify its answer. A successful explicit batch prevents duplicate or unnecessary reinforcement calls; only an unqueried peer may run after an empty or failed batch.
+- `--providers auto|CSV` filters main search, docs search, web search, and URL-fetch routes consistently.
 - `fetch` tries Tavily first, then Firecrawl as fallback when Tavily returns no content.
 - `map` uses Tavily only.
 - `exa-search` and `exa-similar` use Exa only.

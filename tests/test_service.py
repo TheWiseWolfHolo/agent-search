@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -273,6 +274,19 @@ def test_deep_research_quick_budget_keeps_fetch_and_valid_subquestion_links():
         assert step["output_path"] in step["command"]
 
 
+def test_deep_research_default_evidence_dir_uses_platform_temp(monkeypatch, tmp_path):
+    monkeypatch.setattr(service.tempfile, "gettempdir", lambda: str(tmp_path))
+
+    result = service.build_deep_research_plan("portable evidence path")
+    evidence_dir = Path(result["evidence_dir"])
+
+    assert evidence_dir.parent == tmp_path / "agent-search-evidence"
+    assert all(
+        Path(step["output_path"]).is_relative_to(evidence_dir)
+        for step in result["steps"]
+    )
+
+
 def test_legacy_main_search_config_keys_are_rejected(monkeypatch, tmp_path):
     _reset_config(monkeypatch, tmp_path)
 
@@ -396,6 +410,111 @@ async def test_search_uses_xai_responses_for_explicit_xai_config(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_search_fetches_extracted_url_instead_of_whole_query(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://api.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "sk-test-secret")
+    captured = []
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Answer."
+
+    async def fake_fetch(url, fallback="auto", providers="auto"):
+        captured.append(url)
+        return {
+            "ok": True,
+            "url": url,
+            "provider": "tavily",
+            "content": "Page evidence",
+        }, []
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "_run_web_fetch_fallback", fake_fetch)
+
+    result = await service.search(
+        "Please summarize https://example.com/article?ref=agent and keep it concise."
+    )
+
+    assert result["ok"] is True
+    assert captured == ["https://example.com/article?ref=agent"]
+    assert result["routing_decision"]["fetch_urls"] == [
+        "https://example.com/article?ref=agent"
+    ]
+    assert result["extra_sources"][0]["url"] == "https://example.com/article?ref=agent"
+
+
+def test_extract_urls_preserves_balanced_parentheses_and_deduplicates():
+    url = "https://en.wikipedia.org/wiki/Function_(mathematics)"
+    other_url = "https://example.com/reference"
+
+    assert service._extract_urls(
+        f"Read [{url}], compare {other_url}, and then revisit {url}."
+    ) == [url, other_url]
+
+
+@pytest.mark.asyncio
+async def test_search_fetch_respects_provider_filter(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-test-secret")
+    calls = {"tavily": 0, "firecrawl": 0}
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Answer."
+
+    async def should_not_run_tavily(url):
+        calls["tavily"] += 1
+        raise AssertionError("Filtered Tavily should not be attempted")
+
+    async def fake_firecrawl(url, ctx=None):
+        calls["firecrawl"] += 1
+        return "Page evidence"
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "call_tavily_extract", should_not_run_tavily)
+    monkeypatch.setattr(service, "call_firecrawl_scrape", fake_firecrawl)
+
+    result = await service.search(
+        "Read https://example.com/article",
+        providers="openai-compatible,firecrawl",
+    )
+
+    assert result["ok"] is True
+    assert calls == {"tavily": 0, "firecrawl": 1}
+    fetch_attempt = next(
+        attempt
+        for attempt in result["provider_attempts"]
+        if attempt["capability"] == "web_fetch"
+    )
+    assert fetch_attempt["provider"] == "firecrawl"
+    assert fetch_attempt["fallback"] is False
+
+
+@pytest.mark.asyncio
+async def test_fast_validation_reports_no_supplemental_url_path(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Answer."
+
+    async def should_not_fetch(*args, **kwargs):
+        raise AssertionError("Fast validation should not run supplemental fetch")
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "_run_web_fetch_fallback", should_not_fetch)
+
+    result = await service.search(
+        "Read https://example.com/article",
+        validation="fast",
+    )
+
+    assert result["ok"] is True
+    assert result["routing_decision"]["fetch_intent"] is True
+    assert result["routing_decision"]["supplemental_paths"] == []
+
+
+@pytest.mark.asyncio
 async def test_search_overrides_xai_format_and_optional_reasoning(monkeypatch):
     monkeypatch.setenv("XAI_API_KEY", "xai-test-secret")
     monkeypatch.setenv("XAI_API_FORMAT", "responses")
@@ -494,6 +613,8 @@ async def test_search_fallbacks_from_xai_responses_to_openai_compatible(monkeypa
     assert [a["provider"] for a in result["provider_attempts"][:2]] == ["xAI Responses", "OpenAI-compatible"]
     assert result["provider_attempts"][0]["status"] == "error"
     assert result["provider_attempts"][1]["status"] == "ok"
+    assert result["provider_attempts"][0]["fallback"] is False
+    assert result["provider_attempts"][1]["fallback"] is True
     assert result["primary_api_mode"] == "chat-completions"
     assert result["model"] == "relay-model"
     assert result["routing_decision"]["main_search_chain"] == ["xai-responses", "openai-compatible"]
@@ -726,6 +847,305 @@ async def test_strict_still_uses_web_search_without_current_keyword(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_current_query_does_not_repeat_prequeried_web_provider(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-test-secret")
+    calls = {"tavily": 0, "firecrawl": 0}
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Current answer."
+
+    async def fake_tavily_search(query, max_results=6):
+        calls["tavily"] += 1
+        return [{"url": "https://tavily.example.com", "title": "Tavily"}]
+
+    async def fake_firecrawl_search(query, limit=14):
+        calls["firecrawl"] += 1
+        return [{"url": "https://firecrawl.example.com", "title": "Firecrawl"}]
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "call_tavily_search", fake_tavily_search)
+    monkeypatch.setattr(service, "call_firecrawl_search", fake_firecrawl_search)
+
+    result = await service.search(
+        "NBA latest score",
+        validation="balanced",
+        extra_sources=1,
+    )
+
+    assert result["ok"] is True
+    assert calls == {"tavily": 1, "firecrawl": 0}
+    assert {source["url"] for source in result["extra_sources"]} == {
+        "https://tavily.example.com",
+    }
+    assert [
+        attempt["provider"]
+        for attempt in result["provider_attempts"]
+        if attempt["capability"] == "web_search"
+    ] == ["tavily"]
+    assert result["fallback_used"] is False
+
+
+@pytest.mark.asyncio
+async def test_parallel_extra_source_providers_do_not_report_fallback(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-test-secret")
+    calls = {"tavily": 0, "firecrawl": 0}
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Answer."
+
+    async def fake_tavily_search(query, max_results=6):
+        calls["tavily"] += 1
+        return [{"url": "https://tavily.example.com", "title": "Tavily"}]
+
+    async def fake_firecrawl_search(query, limit=14):
+        calls["firecrawl"] += 1
+        return [{"url": "https://firecrawl.example.com", "title": "Firecrawl"}]
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "call_tavily_search", fake_tavily_search)
+    monkeypatch.setattr(service, "call_firecrawl_search", fake_firecrawl_search)
+
+    result = await service.search(
+        "evergreen query",
+        validation="fast",
+        extra_sources=2,
+    )
+
+    assert result["ok"] is True
+    assert calls == {"tavily": 1, "firecrawl": 1}
+    web_attempts = [
+        attempt
+        for attempt in result["provider_attempts"]
+        if attempt["capability"] == "web_search"
+    ]
+    assert [attempt["provider"] for attempt in web_attempts] == [
+        "tavily",
+        "firecrawl",
+    ]
+    assert all(attempt["fallback"] is False for attempt in web_attempts)
+    assert result["fallback_used"] is False
+
+
+@pytest.mark.asyncio
+async def test_extra_source_batch_respects_provider_filter(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-test-secret")
+    calls = {"tavily": 0, "firecrawl": 0}
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Answer."
+
+    async def should_not_run_tavily(query, max_results=6):
+        calls["tavily"] += 1
+        raise AssertionError("Filtered Tavily should not be attempted")
+
+    async def fake_firecrawl_search(query, limit=14):
+        calls["firecrawl"] += 1
+        return [{"url": "https://firecrawl.example.com", "title": "Firecrawl"}]
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "call_tavily_search", should_not_run_tavily)
+    monkeypatch.setattr(service, "call_firecrawl_search", fake_firecrawl_search)
+
+    result = await service.search(
+        "evergreen query",
+        validation="fast",
+        extra_sources=2,
+        providers="openai-compatible,firecrawl",
+    )
+
+    assert result["ok"] is True
+    assert calls == {"tavily": 0, "firecrawl": 1}
+    assert [
+        attempt["provider"]
+        for attempt in result["provider_attempts"]
+        if attempt["capability"] == "web_search"
+    ] == ["firecrawl"]
+
+
+@pytest.mark.asyncio
+async def test_failed_prequery_uses_unqueried_peer_as_fallback(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-test-secret")
+    calls = {"tavily": 0, "firecrawl": 0}
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Current answer."
+
+    async def failing_tavily(query, max_results=6):
+        calls["tavily"] += 1
+        raise RuntimeError("tavily unavailable")
+
+    async def fake_firecrawl_search(query, limit=14):
+        calls["firecrawl"] += 1
+        return [{"url": "https://firecrawl.example.com", "title": "Firecrawl"}]
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "call_tavily_search", failing_tavily)
+    monkeypatch.setattr(service, "call_firecrawl_search", fake_firecrawl_search)
+
+    result = await service.search(
+        "NBA latest score",
+        validation="balanced",
+        extra_sources=1,
+    )
+
+    assert result["ok"] is True
+    assert calls == {"tavily": 1, "firecrawl": 1}
+    web_attempts = [
+        attempt
+        for attempt in result["provider_attempts"]
+        if attempt["capability"] == "web_search"
+    ]
+    assert [attempt["provider"] for attempt in web_attempts] == [
+        "tavily",
+        "firecrawl",
+    ]
+    assert web_attempts[0]["status"] == "error"
+    assert web_attempts[0]["fallback"] is False
+    assert web_attempts[1]["status"] == "ok"
+    assert web_attempts[1]["fallback"] is True
+    assert result["fallback_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_unusable_prequery_result_uses_unqueried_peer_as_fallback(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-test-secret")
+    calls = {"tavily": 0, "firecrawl": 0}
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Current answer."
+
+    async def unusable_tavily(query, max_results=6):
+        calls["tavily"] += 1
+        return [{"title": "Missing URL"}]
+
+    async def fake_firecrawl_search(query, limit=14):
+        calls["firecrawl"] += 1
+        return [{"url": "https://firecrawl.example.com", "title": "Firecrawl"}]
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "call_tavily_search", unusable_tavily)
+    monkeypatch.setattr(service, "call_firecrawl_search", fake_firecrawl_search)
+
+    result = await service.search(
+        "NBA latest score",
+        validation="balanced",
+        extra_sources=1,
+    )
+
+    assert result["ok"] is True
+    assert calls == {"tavily": 1, "firecrawl": 1}
+    web_attempts = [
+        attempt
+        for attempt in result["provider_attempts"]
+        if attempt["capability"] == "web_search"
+    ]
+    assert [attempt["status"] for attempt in web_attempts] == ["empty", "ok"]
+    assert web_attempts[1]["fallback"] is True
+    assert result["fallback_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_fast_extra_source_request_falls_back_to_unqueried_peer(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-test-secret")
+    calls = {"tavily": 0, "firecrawl": 0}
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Answer."
+
+    async def empty_tavily(query, max_results=6):
+        calls["tavily"] += 1
+        return []
+
+    async def fake_firecrawl_search(query, limit=14):
+        calls["firecrawl"] += 1
+        return [{"url": "https://firecrawl.example.com", "title": "Firecrawl"}]
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service, "call_tavily_search", empty_tavily)
+    monkeypatch.setattr(service, "call_firecrawl_search", fake_firecrawl_search)
+
+    result = await service.search(
+        "evergreen query",
+        validation="fast",
+        extra_sources=1,
+    )
+
+    assert result["ok"] is True
+    assert calls == {"tavily": 1, "firecrawl": 1}
+    assert result["routing_decision"]["supplemental_paths"] == ["web_search"]
+    web_attempts = [
+        attempt
+        for attempt in result["provider_attempts"]
+        if attempt["capability"] == "web_search"
+    ]
+    assert [attempt["status"] for attempt in web_attempts] == ["empty", "ok"]
+    assert web_attempts[1]["fallback"] is True
+    assert result["fallback_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_extra_source_provider_exception_is_reported(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "relay-test-secret")
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-test-secret")
+
+    async def fake_search(self, query, platform="", ctx=None):
+        return "Answer."
+
+    class FailingAsyncClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def post(self, url, headers, json):
+            request = httpx.Request("POST", url)
+            return httpx.Response(503, text="tavily unavailable", request=request)
+
+    monkeypatch.setattr(service.OpenAICompatibleSearchProvider, "search", fake_search)
+    monkeypatch.setattr(service.httpx, "AsyncClient", FailingAsyncClient)
+
+    result = await service.search(
+        "evergreen query",
+        validation="fast",
+        extra_sources=1,
+    )
+
+    assert result["ok"] is True
+    web_attempt = next(
+        attempt
+        for attempt in result["provider_attempts"]
+        if attempt["capability"] == "web_search"
+    )
+    assert web_attempt["provider"] == "tavily"
+    assert web_attempt["status"] == "error"
+    assert web_attempt["error_type"] == "runtime_error"
+    assert "503" in web_attempt["error"]
+
+
+@pytest.mark.asyncio
 async def test_search_respects_fallback_off_for_main_search(monkeypatch):
     monkeypatch.setenv("XAI_API_KEY", "xai-test-secret")
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_URL", "https://relay.example.com/v1")
@@ -792,6 +1212,9 @@ async def test_search_reports_primary_provider_http_error(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_prefers_tavily(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-secret")
+
     async def yes_tavily(url):
         return "# Tavily Page"
 
@@ -810,6 +1233,9 @@ async def test_fetch_prefers_tavily(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fetch_fallbacks_to_firecrawl(monkeypatch):
+    monkeypatch.setenv("TAVILY_API_KEY", "tavily-secret")
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-secret")
+
     async def no_tavily(url):
         return None
 
@@ -824,6 +1250,30 @@ async def test_fetch_fallbacks_to_firecrawl(monkeypatch):
     assert result["ok"] is True
     assert result["provider"] == "firecrawl"
     assert result["content"] == "# Page"
+    assert result["fallback_used"] is True
+
+
+@pytest.mark.asyncio
+async def test_fetch_with_only_firecrawl_is_not_reported_as_fallback(monkeypatch):
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "firecrawl-secret")
+
+    async def should_not_run_tavily(url):
+        raise AssertionError("Unconfigured Tavily should not be attempted")
+
+    async def yes_firecrawl(url, ctx=None):
+        return "# Page"
+
+    monkeypatch.setattr(service, "call_tavily_extract", should_not_run_tavily)
+    monkeypatch.setattr(service, "call_firecrawl_scrape", yes_firecrawl)
+
+    result = await service.fetch("https://example.com")
+
+    assert result["ok"] is True
+    assert result["provider"] == "firecrawl"
+    assert result["fallback_used"] is False
+    assert [attempt["provider"] for attempt in result["provider_attempts"]] == [
+        "firecrawl"
+    ]
 
 
 @pytest.mark.asyncio
