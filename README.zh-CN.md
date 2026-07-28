@@ -173,6 +173,13 @@ Windows wrapper 的中文 JSON 管道检查：
 agent-search deep "深度搜索一下最近的比特币行情" --format json | ConvertFrom-Json
 ```
 
+## 项目沿革
+
+Agent Search 是基于
+[konbakuyomu/smartsearch](https://github.com/konbakuyomu/smartsearch)
+演进的独立发行版。它拥有自己的命令名、包命名空间、配置前缀、发布节奏和产品决策，同时会继续借鉴上游项目的优秀实践。原项目的 MIT 版权声明已保留在
+[LICENSE](LICENSE) 中。
+
 ## 发布通道
 
 稳定版使用 Git tag 和 npm `latest`：

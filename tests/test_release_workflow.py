@@ -138,6 +138,19 @@ def test_release_docs_explain_release_lanes_and_verification():
         assert marker in packaged_contract
 
 
+def test_distribution_preserves_upstream_lineage_and_license_notice():
+    license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_zh = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+    assert "Copyright (c) 2025 GuDaStudio" in license_text
+    assert "Copyright (c) 2026 TheWiseWolfHolo" in license_text
+    assert "https://github.com/konbakuyomu/smartsearch" in readme
+    assert "https://github.com/konbakuyomu/smartsearch" in readme_zh
+    assert 'Upstream = "https://github.com/konbakuyomu/smartsearch"' in pyproject
+
+
 def test_initial_release_notes_describe_user_visible_capabilities():
     notes = (ROOT / ".github" / "releases" / "v0.1.0.md").read_text(encoding="utf-8")
 
