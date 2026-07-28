@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -248,6 +249,39 @@ def test_deep_research_shared_skill_files_are_synchronized():
         assert (PUBLIC_SKILL_DIR / relative).read_text(encoding="utf-8") == (
             PACKAGED_SKILL_DIR / relative
         ).read_text(encoding="utf-8")
+
+
+def test_bundled_skill_top_level_commands_and_credential_policy_are_valid():
+    from agent_search.cli import COMMAND_ALIASES
+
+    valid_commands = set(COMMAND_ALIASES)
+    valid_commands.update(
+        alias
+        for aliases in COMMAND_ALIASES.values()
+        for alias in aliases
+    )
+    valid_commands.update({"--version", "--v", "-v"})
+
+    for skill_path in (
+        PUBLIC_SKILL_DIR / "SKILL.md",
+        PACKAGED_SKILL_DIR / "SKILL.md",
+    ):
+        text = skill_path.read_text(encoding="utf-8")
+        documented_commands = re.findall(
+            r"(?m)^\s*agent-search\s+([^\s`]+)",
+            text,
+        )
+        invalid_commands = sorted(
+            {command for command in documented_commands if command not in valid_commands}
+        )
+
+        assert invalid_commands == []
+        assert "agent-search z " not in text
+        assert "prefer `agent-search setup` for interactive human credential entry" in text
+        assert "`agent-search config set KEY VALUE` only for non-interactive automation" in text
+        assert "not automatically compromised" in text
+        assert "source control, shared/public logs, or another untrusted channel" in text
+        assert "hard safety gate when previous key values were pasted into chat" not in text
 
 
 def test_web_source_reinforcement_contract_public_and_packaged_assets_match():

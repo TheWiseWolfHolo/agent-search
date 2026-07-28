@@ -10,7 +10,7 @@ Use the local `agent-search` command as the default execution layer for web rese
 ## Default workflow
 
 1. Run `agent-search doctor --format json` when configuration or availability is uncertain.
-2. If `doctor` reports missing configuration, use `agent-search setup` or `agent-search config set KEY VALUE` when the user provides keys. Do not ask users to edit global environment variables by default.
+2. If `doctor` reports missing configuration, prefer `agent-search setup` for interactive human credential entry because it hides secret input. Use `agent-search config set KEY VALUE` only for non-interactive automation, and never echo a real secret in generated commands or output. Do not ask users to edit global environment variables by default.
 3. If OpenAI-compatible `search` hangs or times out after `doctor` succeeds, run `agent-search diagnose openai-compatible --format markdown` and use its summary/recommendation. This one command tests quick chat plus real search-shape `stream=false` and `stream=true`.
 4. If `doctor` returns `ok: true`, use only `agent-search` CLI subcommands for web research. Do not call Codex native web search in the same task.
 5. Use `agent-search skills status --targets codex --format json` when the global skill may be stale; use `agent-search skills update --targets codex --format json` to refresh this skill without rerunning setup.
@@ -283,7 +283,7 @@ agent-search s "query" --format json
 agent-search s "nba战报" --format content
 agent-search f "https://example.com" --format markdown
 agent-search exa "OpenAI Responses API documentation" --format json
-agent-search z "today China AI news" --format json
+agent-search x "today China AI news" --format json
 agent-search c7 "react" "hooks" --format json
 agent-search c7docs "/facebook/react" "useEffect cleanup" --format json
 agent-search cfg ls --format json
@@ -331,7 +331,7 @@ agent-search fetch "https://example.com/source" --format markdown --output fetch
 - If `doctor` or a command fails, report the failure and recovery steps; do not silently fall back to another web-search route.
 - If the user explicitly asks to bypass agent-search, state that another approved web-search route must be configured first.
 - Do not use legacy MCP tool names in prompts, notes, or generated instructions for this workflow.
-- Treat key rotation as a hard safety gate when previous key values were pasted into chat or logs.
+- A key supplied in the current conversation for authorized configuration or debugging is not automatically compromised. Never echo it, and require rotation only when evidence shows it entered source control, shared/public logs, or another untrusted channel.
 - For provider architecture maintenance, verify the distributable contract rather than the current developer machine's wrappers or local config. Keep fallback same-capability only.
 - Treat the xAI multi-protocol channel and OpenAI-compatible as peer `main_search` providers. Do not reuse one provider's URL/key to fabricate the other provider as a fallback.
 
