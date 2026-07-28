@@ -1,5 +1,7 @@
 # WolfHolo Agent Search
 
+[![CI](https://github.com/TheWiseWolfHolo/agent-search/actions/workflows/ci.yml/badge.svg)](https://github.com/TheWiseWolfHolo/agent-search/actions/workflows/ci.yml)
+
 简体中文 | [English](README.md)
 
 WolfHolo Agent Search 是一个给 AI 助手和命令行用户使用的 CLI-first 研究工具。它把联网搜索、来源发现、网页正文抓取、站点 map、provider 诊断和离线深度研究规划收束到一个可复现的命令层。
